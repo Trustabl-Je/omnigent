@@ -200,6 +200,11 @@ Run with a real Pi CLI on PATH and retries disabled. Composer API evidence
 does not cover browser clicks; scripted routing does not establish live judge
 quality. Broader Smart Routing journeys remain outside this Pi-specific recipe.
 
+**Pi user setup (own environment):** use the
+[global configuration recipe](./harness-acceptance.md#pi-user-setup-own-environment)
+to verify supported MCP/skills/extensions discovery and native process resume,
+including the SDK tool and context-inheritance boundaries.
+
 **Launch settings (own environment):** connect a host with Claude/Codex
 configured, and put a command and two args under
 `harness.claude-native` / `harness.codex-native` in its `~/.omnigent/config.yaml`.

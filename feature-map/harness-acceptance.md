@@ -130,6 +130,30 @@ uv run --no-sync pytest tests/e2e/omnigent/test_pi_bundle_extensions_cwd_e2e.py 
 ```
 
 
+### Pi user setup (own environment)
+
+For `launch-reply`, `mcp` and `reload-resume`, seed an isolated default
+`~/.pi/agent` and repeat with `PI_CODING_AGENT_DIR` pointing elsewhere.
+Verify supported skills, extension hooks and installed/local packages load;
+disabled extensions remain disabled. Native Pi should call a harmless configured
+MCP tool and retain its result after a process restart. SDK Pi keeps tools on
+the Omnigent bridge; preserving configuration does not enable native MCP tools.
+
+Run the existing scenarios serially with the selected Pi executable on `PATH`:
+
+```sh
+uv run --no-sync pytest tests/e2e/omnigent/test_pi_managed_extensions_e2e.py tests/e2e/omnigent/test_pi_context_files_e2e.py --reruns 0 -q
+```
+
+The context matrix checks YAML/bundle instructions, `context_files: false`,
+prompt replacement and `skills: none`. Relocating the user setup does not add
+global instruction files to managed sessions. These are real SDK CLI and native
+provider-launch/process checks with scripted replies; browser launch, OS sandbox
+mounts and MCP HTTP/OAuth need separate evidence. Record the candidate revision
+and CI-pinned Pi result separately from an optional newer-version run. Supported
+Pi resources do not imply Claude marketplace compatibility or Settings inventory
+parity.
+
 ### Deterministic checks versus live canaries
 
 | Lane | Use | What a pass does not prove |
