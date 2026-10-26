@@ -60,11 +60,9 @@ describe("harness account routes", () => {
           expires_at: 1_798_761_600,
         }),
       )
-      .mockResolvedValueOnce(mockResponse({ status: "pending", error: null }))
+      .mockResolvedValueOnce(mockResponse({ status: "pending", error: null, expired: false }))
       .mockResolvedValueOnce(mockResponse({}, 204))
-      .mockResolvedValueOnce(
-        mockResponse({ configured_harnesses: { "codex-native": false }, harness_accounts: {} }),
-      );
+      .mockResolvedValueOnce(mockResponse({ configured_harnesses: null, harness_accounts: null }));
 
     await expect(startHarnessLogin("host/1", "codex-native")).resolves.toEqual({
       kind: "started",
@@ -73,9 +71,16 @@ describe("harness account routes", () => {
       user_code: "ABCD-EFGH",
       expires_at: 1_798_761_600,
     });
-    await fetchHarnessLogin("host/1", "codex-native", "login/1");
+    await expect(fetchHarnessLogin("host/1", "codex-native", "login/1")).resolves.toEqual({
+      status: "pending",
+      error: null,
+      expired: false,
+    });
     await cancelHarnessLogin("host/1", "codex-native", "login/1");
-    await logoutHarnessOnHost("host/1", "codex-native");
+    await expect(logoutHarnessOnHost("host/1", "codex-native")).resolves.toEqual({
+      configured_harnesses: null,
+      harness_accounts: null,
+    });
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       "/v1/hosts/host%2F1/harnesses/codex/login",

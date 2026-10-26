@@ -79,12 +79,14 @@ const baseProps: HarnessFixDialogProps = {
   harnessLabel: "Codex",
   onFixed: vi.fn(),
 };
+let dialogQueryClient: QueryClient;
 
 function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
   const props = { ...baseProps, ...overrides };
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  dialogQueryClient = client;
   render(
     <QueryClientProvider client={client}>
       <HarnessFixDialog {...props} />
@@ -497,21 +499,24 @@ describe("HarnessFixDialog", () => {
       throw new Error(`Unexpected URL: ${url}`);
     });
     const user = userEvent.setup();
+    const host = {
+      ...baseProps.host,
+      configured_harnesses: { "claude-native": true },
+      harness_accounts: {
+        claude: {
+          kind: "subscription" as const,
+          email: "old@example.com",
+          plan: "Pro",
+        },
+      },
+    };
     renderDialog({
       mode: "switch",
       harness: "claude-native",
       harnessLabel: "Claude Code",
-      host: {
-        ...baseProps.host,
-        harness_accounts: {
-          claude: {
-            kind: "subscription",
-            email: "old@example.com",
-            plan: "Pro",
-          },
-        },
-      },
+      host,
     });
+    dialogQueryClient.setQueryData(["hosts", { includeSandbox: false }], [host]);
 
     expect(screen.getByText(/Every session on Local laptop/)).toBeVisible();
     expect(screen.getByText("old@example.com · Pro")).toBeVisible();
@@ -528,6 +533,44 @@ describe("HarnessFixDialog", () => {
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/hosts/host%2F1/harnesses/claude/logout", {
       method: "POST",
     });
+    expect(dialogQueryClient.getQueryData(["hosts", { includeSandbox: false }])).toEqual([
+      {
+        ...host,
+        configured_harnesses: { "claude-native": "needs-auth" },
+        harness_accounts: {},
+      },
+    ]);
+  });
+
+  it("keeps cached readiness and accounts when logout snapshots are null", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/logout") && init?.method === "POST") {
+        return json({ configured_harnesses: null, harness_accounts: null });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const host = {
+      ...baseProps.host,
+      configured_harnesses: { "claude-native": true },
+      harness_accounts: {
+        claude: { kind: "subscription" as const, email: "old@example.com", plan: "Pro" },
+      },
+    };
+    renderDialog({
+      mode: "switch",
+      harness: "claude-native",
+      harnessLabel: "Claude Code",
+      host,
+    });
+    dialogQueryClient.setQueryData(["hosts", { includeSandbox: false }], [host]);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Sign out and switch" }));
+
+    expect(await screen.findByText("claude auth login --claudeai")).toBeVisible();
+    expect(dialogQueryClient.getQueryData(["hosts", { includeSandbox: false }])).toEqual([host]);
   });
 
   it("falls back to the copy command when switch logout is unsupported", async () => {

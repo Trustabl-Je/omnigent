@@ -29,6 +29,7 @@ import {
   useInstallHarness,
   type HarnessAccount,
   type HarnessLoginStart,
+  type HarnessLogoutResult,
   type Host,
   type StoreCredentialResult,
 } from "@/hooks/useHosts";
@@ -379,13 +380,35 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       ? `${loginCommand ?? "claude auth login --claudeai"} --email ${shellArgument(emailHint.trim())}`
       : loginCommand;
 
+  const updateCachedHostAfterLogout = useCallback(
+    (result: HarnessLogoutResult) => {
+      queryClient.setQueriesData<Host[]>({ queryKey: ["hosts"] }, (cachedHosts) =>
+        cachedHosts?.map((cachedHost) =>
+          cachedHost.host_id === hostId
+            ? {
+                ...cachedHost,
+                ...(result.configured_harnesses !== null
+                  ? { configured_harnesses: result.configured_harnesses }
+                  : {}),
+                ...(result.harness_accounts !== null
+                  ? { harness_accounts: result.harness_accounts }
+                  : {}),
+              }
+            : cachedHost,
+        ),
+      );
+    },
+    [hostId, queryClient],
+  );
+
   const switchAccount = async () => {
     const id = ++runId.current;
     setError("");
     setPhase("progress");
     try {
-      await logoutHarnessOnHost(hostId, harness);
+      const result = await logoutHarnessOnHost(hostId, harness);
       if (runId.current !== id) return;
+      updateCachedHostAfterLogout(result);
       if (accountKey === "codex") await startDeviceLogin();
       else setPhase("personal");
     } catch (reason) {

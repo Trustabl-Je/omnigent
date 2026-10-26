@@ -400,7 +400,6 @@ function credentialPresentation(
   }
   const account = host?.harness_accounts?.[harnessAccountKey(harness)];
   if (account) {
-    if (account.kind === "gateway") return HARNESS_CREDENTIAL_COPY.isaac;
     if (account.kind === "providers") {
       return {
         label: "Providers",
@@ -435,12 +434,9 @@ function providerDetails(account: HarnessAccount): string {
     .join(" · ");
 }
 
-function configuredAccountLabel(
-  host: Host | null,
-  harness: string,
-): string | undefined {
+function configuredAccountLabel(host: Host | null, harness: string): string | undefined {
   if (host?.gateway_inference?.[harness] === true) {
-    return gatewayPresentation(databricksFeatures).label;
+    return HARNESS_CREDENTIAL_COPY.isaac.label;
   }
   const account = host?.harness_accounts?.[harnessAccountKey(harness)];
   if (!account) return undefined;
@@ -448,7 +444,6 @@ function configuredAccountLabel(
     const labels = (account.providers ?? []).map((provider) => provider.label);
     return labels.length > 0 ? labels.join(", ") : undefined;
   }
-  if (account.kind === "gateway") return HARNESS_CREDENTIAL_COPY.isaac.label;
   return [account.email, account.plan].filter(Boolean).join(" · ") || undefined;
 }
 

@@ -50,7 +50,7 @@ export interface HarnessAccountProvider {
 }
 
 export interface HarnessAccount {
-  kind: "chatgpt" | "api_key" | "subscription" | "providers" | "gateway" | "unknown";
+  kind: "none" | "chatgpt" | "api_key" | "subscription" | "providers" | "unknown";
   email?: string;
   org?: string;
   plan?: string;
@@ -403,12 +403,13 @@ export type HarnessLoginStartResult =
 export interface HarnessLoginStatus {
   status: "pending" | "succeeded" | "failed" | "cancelled" | "expired";
   error?: string | null;
+  expired: boolean;
   configured_harnesses?: Record<string, boolean | string>;
   harness_accounts?: Record<string, HarnessAccount> | null;
 }
 
 export interface HarnessLogoutResult {
-  configured_harnesses: Record<string, boolean | string>;
+  configured_harnesses: Record<string, boolean | string> | null;
   harness_accounts: Record<string, HarnessAccount> | null;
 }
 
