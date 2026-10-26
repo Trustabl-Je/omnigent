@@ -3371,8 +3371,7 @@ def create_app(
         except ImportError:
             smart_routing_enabled = False
             smart_routing_sources = {"external": False, "oss": False}
-        # Resolve the deployment gate on every request. The same resolver feeds
-        # route enforcement, so frontend and backend cannot disagree.
+        # Resolve the gate per request with the same resolver used by route enforcement.
         current_harness_install_enabled = harness_install_enabled(app.state.harness_install)
         frontend_features = app.state.feature_flags.frontend_dict()
         frontend_features[Feature.HARNESS_INSTALL.value] = current_harness_install_enabled

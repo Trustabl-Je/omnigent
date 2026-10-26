@@ -97,6 +97,36 @@ for line in sys.stdin:
 
 
 @pytest.mark.asyncio
+async def test_codex_login_rejects_non_https_verification_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(
+        bin_dir / "codex",
+        """import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'initialize':
+        print(json.dumps({'id': message['id'], 'result': {}}), flush=True)
+    elif message.get('method') == 'account/login/start':
+        print(json.dumps({'id': message['id'], 'result': {
+            'loginId': 'login-1', 'userCode': 'ABCD-EFGH',
+            'verificationUrl': 'javascript:alert(1)'
+        }}), flush=True)
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    session = harness_login.CodexLoginSession()
+    try:
+        with pytest.raises(RuntimeError, match="invalid device login URL"):
+            await session.start()
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
 async def test_claude_logout_uses_supported_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,6 +181,37 @@ else:
         "kind": "providers",
         "providers": [{"id": "anthropic", "label": "Anthropic", "auth_type": "oauth"}],
     }
+
+
+def test_pi_probe_shares_one_deadline_and_keeps_partial_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deadlines: list[float] = []
+
+    def _run(
+        argv: list[str],
+        *,
+        deadline: float,
+        cancel_event: threading.Event | None,
+    ) -> tuple[int, dict[str, object] | None]:
+        del cancel_event
+        deadlines.append(deadline)
+        provider = argv[argv.index("--provider") + 1]
+        if provider == "anthropic":
+            return 0, {"status": "ready", "authType": "oauth"}
+        return 1, None
+
+    monkeypatch.setattr(harness_accounts.shutil, "which", lambda command: command)
+    monkeypatch.setattr(harness_accounts, "_run_json_command", _run)
+
+    account = harness_accounts.probe_harness_account("pi", timeout_s=7)
+
+    assert account == {
+        "kind": "providers",
+        "providers": [{"id": "anthropic", "label": "Anthropic", "auth_type": "oauth"}],
+    }
+    assert len(deadlines) == 3
+    assert len(set(deadlines)) == 1
 
 
 def test_json_account_probes_do_not_inherit_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -248,6 +309,9 @@ def test_opencode_probe_returns_only_non_secret_metadata(
     )
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for _provider_id, _label, env_var in harness_accounts._ENV_PROVIDER_VARS:
+        monkeypatch.delenv(env_var, raising=False)
 
     account = harness_accounts.harness_account_map()["opencode"]
     assert account == {
@@ -348,6 +412,7 @@ def test_inconclusive_and_logged_out_probes_are_not_expired(
         bin_dir / "claude",
         """import json
 print(json.dumps({'loggedIn': False}))
+raise SystemExit(1)
 """,
     )
     monkeypatch.setenv("PATH", str(bin_dir))
@@ -395,7 +460,7 @@ def test_opencode_probe_includes_env_and_config_sources(
         lambda: OpenCodeAuthSummary(
             installed=True,
             stored_providers=(),
-            env_providers=("OpenAI",),
+            env_providers=("OpenAI", "Google Gemini"),
             configured_providers=("amazon-bedrock",),
         ),
     )
@@ -405,6 +470,7 @@ def test_opencode_probe_includes_env_and_config_sources(
         "kind": "providers",
         "providers": [
             {"id": "openai", "label": "OpenAI", "auth_type": "env"},
+            {"id": "google", "label": "Google Gemini", "auth_type": "env"},
             {"id": "amazon-bedrock", "label": "amazon-bedrock", "auth_type": "config"},
         ],
     }

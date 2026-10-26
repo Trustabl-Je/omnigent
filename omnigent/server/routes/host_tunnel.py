@@ -1018,6 +1018,7 @@ async def _receive_loop(
                 )
                 state.expired = frame.expired
                 state.error = frame.error
+                state.terminal_at = int(time.time())
                 state.configured_harnesses = frame.configured_harnesses
                 state.harness_accounts = frame.harness_accounts
                 conn.active_harness_logins.pop(state.harness, None)

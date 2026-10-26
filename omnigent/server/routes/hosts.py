@@ -22,6 +22,7 @@ import logging
 import secrets
 import weakref
 from typing import Any, cast
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -92,6 +93,8 @@ from omnigent.stores.host_store import Host, HostStore, host_is_live
 from omnigent.stores.permission_store import PermissionStore
 
 _logger = logging.getLogger(__name__)
+
+_HARNESS_LOGIN_TERMINAL_GRACE_S = 5 * 60
 
 # Managed `/hosts/{host_id}` requests are slice-keyed to the host-owning replica;
 # self-hosted servers are single-replica. The database CAS remains the fallback.
@@ -834,6 +837,30 @@ def create_hosts_router(
         if not harness_install_enabled(harness_install_gate):
             raise HTTPException(status_code=404, detail="not found")
 
+    def prune_terminal_harness_logins(conn: HostConnection) -> None:
+        cutoff = now_epoch() - _HARNESS_LOGIN_TERMINAL_GRACE_S
+        for login_id, state in list(conn.harness_logins.items()):
+            if state.terminal_at is not None and state.terminal_at <= cutoff:
+                conn.harness_logins.pop(login_id, None)
+
+    async def apply_harness_snapshot(
+        host_id: str,
+        conn: HostConnection,
+        result: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        result_configured = result.get("configured_harnesses")
+        result_accounts = result.get("harness_accounts")
+        if isinstance(result_configured, dict):
+            await asyncio.to_thread(
+                host_store.update_harness_readiness,
+                host_id,
+                result_configured,
+            )
+            conn.hello.configured_harnesses = dict(result_configured)
+        if isinstance(result_accounts, dict):
+            conn.hello.harness_accounts = dict(result_accounts)
+        return conn.hello.configured_harnesses, conn.hello.harness_accounts
+
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
         """List all hosts owned by the authenticated user.
@@ -859,6 +886,7 @@ def create_hosts_router(
         # One clock for the whole batch so every host is classified
         # against a consistent "now" (host_is_live's documented idiom).
         now = now_epoch()
+        harness_setup_enabled = harness_install_enabled(harness_install_gate)
         result: list[dict[str, Any]] = []
         for host in hosts:
             # Status comes from the DB, not host_registry. The registry
@@ -883,9 +911,6 @@ def create_hosts_router(
                 # user-connectable machines.
                 "sandbox_provider": host.sandbox_provider,
                 "configured_harnesses": host.configured_harnesses,
-                "harness_login_supported": bool(
-                    conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
-                ),
                 # Held in memory from the host's connect handshake, not the
                 # hosts row. ``None`` means this replica has no report yet —
                 # emitted as-is so a client can tell "unknown" from "not
@@ -894,11 +919,16 @@ def create_hosts_router(
                 "interactive_shells": host_registry.interactive_shells(host.host_id),
             }
             if (
-                conn is not None
+                harness_setup_enabled
+                and conn is not None
                 and CAP_HARNESS_ACCOUNTS in conn.hello.capabilities
                 and conn.hello.harness_accounts is not None
             ):
                 item["harness_accounts"] = conn.hello.harness_accounts
+            if harness_setup_enabled:
+                item["harness_login_supported"] = bool(
+                    conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
+                )
             result.append(item)
         return {"hosts": result}
 
@@ -929,6 +959,7 @@ def create_hosts_router(
         # replicas, gated on the liveness freshness window — see
         # list_hosts above for the full rationale.
         conn = host_registry.get(host.host_id)
+        harness_setup_enabled = harness_install_enabled(harness_install_gate)
         result: dict[str, Any] = {
             "host_id": host.host_id,
             "name": host.name,
@@ -938,9 +969,6 @@ def create_hosts_router(
             # server-managed sandbox host (e.g. "modal").
             "sandbox_provider": host.sandbox_provider,
             "configured_harnesses": host.configured_harnesses,
-            "harness_login_supported": bool(
-                conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
-            ),
             # Same semantics as list_hosts: reported on connect and held in
             # memory, so ``None`` is "no report on this replica yet".
             "gateway_inference": host_registry.gateway_inference(host.host_id),
@@ -948,11 +976,16 @@ def create_hosts_router(
             "runners": [],
         }
         if (
-            conn is not None
+            harness_setup_enabled
+            and conn is not None
             and CAP_HARNESS_ACCOUNTS in conn.hello.capabilities
             and conn.hello.harness_accounts is not None
         ):
             result["harness_accounts"] = conn.hello.harness_accounts
+        if harness_setup_enabled:
+            result["harness_login_supported"] = bool(
+                conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
+            )
         return result
 
     @router.get("/hosts/{host_id}/harnesses/{harness}/model-options")
@@ -1679,19 +1712,9 @@ def create_hosts_router(
         refreshed_gateway = optional_str_bool_map(result, "gateway_inference")
         if refreshed_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, refreshed_gateway)
-        result_configured = result.get("configured_harnesses")
-        result_accounts = result.get("harness_accounts")
-        if isinstance(result_configured, dict):
-            await asyncio.to_thread(
-                host_store.update_harness_readiness,
-                host.host_id,
-                result_configured,
-            )
-            conn.hello.configured_harnesses = dict(result_configured)
-        if isinstance(result_accounts, dict):
-            conn.hello.harness_accounts = dict(result_accounts)
-        refreshed_configured = conn.hello.configured_harnesses
-        refreshed_accounts = conn.hello.harness_accounts
+        refreshed_configured, refreshed_accounts = await apply_harness_snapshot(
+            host.host_id, conn, result
+        )
         return {
             "configured_harnesses": refreshed_configured,
             "harness_accounts": refreshed_accounts,
@@ -1720,6 +1743,7 @@ def create_hosts_router(
                 "this host does not support harness login",
                 code=ErrorCode.LOGIN_UNSUPPORTED,
             )
+        prune_terminal_harness_logins(conn)
         if harness in conn.active_harness_logins:
             return cast(
                 dict[str, Any],
@@ -1741,6 +1765,7 @@ def create_hosts_router(
         )
         conn.harness_logins[login_id] = state
         accepted = False
+        host_login_started = False
         try:
             result = await _proxy_harness_login_start(
                 host_registry=host_registry,
@@ -1762,6 +1787,7 @@ def create_hosts_router(
                 )
             if result.get("status") != "ok":
                 raise HTTPException(status_code=502, detail=result.get("error") or "login failed")
+            host_login_started = True
             returned_login_id = result.get("login_id")
             verification_url = result.get("verification_url")
             user_code = result.get("user_code")
@@ -1775,6 +1801,9 @@ def create_hosts_router(
                 raise HTTPException(
                     status_code=502, detail="host returned incomplete login details"
                 )
+            parsed_verification_url = urlparse(verification_url)
+            if parsed_verification_url.scheme != "https" or not parsed_verification_url.netloc:
+                raise HTTPException(status_code=502, detail="host returned an invalid login URL")
             state.expires_at = expires_at
             accepted = True
             return {
@@ -1784,6 +1813,13 @@ def create_hosts_router(
                 "expires_at": expires_at,
             }
         finally:
+            if not accepted and host_login_started:
+                with contextlib.suppress(Exception):
+                    await _proxy_harness_login_cancel(
+                        host_registry=host_registry,
+                        host_conn=conn,
+                        login_id=login_id,
+                    )
             if not accepted:
                 conn.harness_logins.pop(login_id, None)
             if not accepted and conn.active_harness_logins.get(harness) == login_id:
@@ -1807,6 +1843,7 @@ def create_hosts_router(
             raise OmnigentError(
                 "this host does not support harness login", code=ErrorCode.LOGIN_UNSUPPORTED
             )
+        prune_terminal_harness_logins(conn)
         state = conn.harness_logins.get(login_id)
         if state is None or state.harness != harness:
             raise HTTPException(status_code=404, detail="login not found")
@@ -1814,7 +1851,18 @@ def create_hosts_router(
             state.status = "expired"
             state.expired = True
             state.error = "login expired"
+            state.terminal_at = now_epoch()
             conn.active_harness_logins.pop(harness, None)
+            try:
+                cancel_result = await _proxy_harness_login_cancel(
+                    host_registry=host_registry,
+                    host_conn=conn,
+                    login_id=login_id,
+                )
+                if cancel_result.get("status") != "ok":
+                    _logger.warning("Host failed to cancel expired login %s", login_id)
+            except Exception:
+                _logger.warning("Could not cancel expired host login %s", login_id, exc_info=True)
         response: dict[str, Any] = {
             "status": state.status,
             "error": state.error,
@@ -1844,6 +1892,7 @@ def create_hosts_router(
             raise OmnigentError(
                 "this host does not support harness login", code=ErrorCode.LOGIN_UNSUPPORTED
             )
+        prune_terminal_harness_logins(conn)
         state = conn.harness_logins.get(login_id)
         if state is None or state.harness != harness:
             raise HTTPException(status_code=404, detail="login not found")
@@ -1855,6 +1904,7 @@ def create_hosts_router(
                 raise HTTPException(status_code=502, detail=result.get("error") or "cancel failed")
             state.status = "cancelled"
             state.error = None
+            state.terminal_at = now_epoch()
             conn.active_harness_logins.pop(harness, None)
         return {"status": state.status, "error": state.error, "expired": state.expired}
 
@@ -1862,10 +1912,12 @@ def create_hosts_router(
     async def logout_host_harness(request: Request, host_id: str, harness: str) -> dict[str, Any]:
         """Log Codex or Claude out and return freshly probed account state."""
         require_harness_install()
-        if harness not in {"codex", "claude"}:
+        harness_key = harness_account_key(harness)
+        if harness_key not in {"codex", "claude"}:
             raise HTTPException(
                 status_code=400, detail="logout is supported only for codex and claude"
             )
+        harness = harness_key
         host, conn = await _connected_owned_host(
             request=request,
             host_id=host_id,
@@ -1882,17 +1934,7 @@ def create_hosts_router(
         )
         if result.get("status") != "ok":
             raise HTTPException(status_code=502, detail=result.get("error") or "logout failed")
-        result_configured = result.get("configured_harnesses")
-        result_accounts = result.get("harness_accounts")
-        if isinstance(result_configured, dict):
-            await asyncio.to_thread(
-                host_store.update_harness_readiness, host.host_id, result_configured
-            )
-            conn.hello.configured_harnesses = dict(result_configured)
-        if isinstance(result_accounts, dict):
-            conn.hello.harness_accounts = dict(result_accounts)
-        configured = conn.hello.configured_harnesses
-        accounts = conn.hello.harness_accounts
+        configured, accounts = await apply_harness_snapshot(host.host_id, conn, result)
         return {"configured_harnesses": configured, "harness_accounts": accounts}
 
     @router.post("/hosts/{host_id}/harnesses/{harness}/install")
@@ -2001,19 +2043,9 @@ def create_hosts_router(
         installed_gateway = optional_str_bool_map(result, "gateway_inference")
         if installed_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, installed_gateway)
-        result_configured = result.get("configured_harnesses")
-        result_accounts = result.get("harness_accounts")
-        if isinstance(result_configured, dict):
-            await asyncio.to_thread(
-                host_store.update_harness_readiness,
-                host.host_id,
-                result_configured,
-            )
-            conn.hello.configured_harnesses = dict(result_configured)
-        if isinstance(result_accounts, dict):
-            conn.hello.harness_accounts = dict(result_accounts)
-        installed_configured = conn.hello.configured_harnesses
-        installed_accounts = conn.hello.harness_accounts
+        installed_configured, installed_accounts = await apply_harness_snapshot(
+            host.host_id, conn, result
+        )
 
         return {
             "object": "harness_install",
@@ -2127,19 +2159,9 @@ def create_hosts_router(
         written_gateway = optional_str_bool_map(result, "gateway_inference")
         if written_gateway is not None:
             host_registry.record_gateway_inference(host.host_id, written_gateway)
-        result_configured = result.get("configured_harnesses")
-        result_accounts = result.get("harness_accounts")
-        if isinstance(result_configured, dict):
-            await asyncio.to_thread(
-                host_store.update_harness_readiness,
-                host.host_id,
-                result_configured,
-            )
-            conn.hello.configured_harnesses = dict(result_configured)
-        if isinstance(result_accounts, dict):
-            conn.hello.harness_accounts = dict(result_accounts)
-        written_configured = conn.hello.configured_harnesses
-        written_accounts = conn.hello.harness_accounts
+        written_configured, written_accounts = await apply_harness_snapshot(
+            host.host_id, conn, result
+        )
 
         return {
             "object": "harness_credential",

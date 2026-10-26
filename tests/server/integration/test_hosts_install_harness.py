@@ -245,6 +245,7 @@ async def install_setup(
                 continue
             if isinstance(frame, HostHarnessLogoutFrame):
                 reply = replies.get("__logout__")
+                replies.setdefault("__logout_harnesses__", {})[frame.harness] = True
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -841,8 +842,19 @@ async def test_refresh_harnesses_non_owner_returns_403(
     assert resp.status_code == 403
 
 
-async def test_codex_login_non_owner_returns_403(
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        pytest.param("POST", "login", id="start"),
+        pytest.param("GET", "login/login-1", id="status"),
+        pytest.param("DELETE", "login/login-1", id="cancel"),
+        pytest.param("POST", "logout", id="logout"),
+    ],
+)
+async def test_harness_account_routes_non_owner_return_403(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    method: str,
+    path: str,
 ) -> None:
     from omnigent.server.auth import AuthProvider
 
@@ -870,8 +882,9 @@ async def test_codex_login_non_owner_returns_403(
     async with AsyncClient(
         transport=ASGITransport(app=auth_app), base_url="http://test"
     ) as client:
-        response = await client.post(
-            f"/v1/hosts/{_HOST_ID}/harnesses/codex/login",
+        response = await client.request(
+            method,
+            f"/v1/hosts/{_HOST_ID}/harnesses/codex/{path}",
             headers={"X-Test-User": "bob@example.com"},
         )
 
@@ -1003,6 +1016,46 @@ async def test_codex_native_login_uses_canonical_host_family(
     }
 
 
+async def test_codex_native_logout_uses_canonical_host_family(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, _registry, _comm, replies, _drain = install_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/logout")
+
+    assert response.status_code == 200
+    assert replies["__logout_harnesses__"] == {"codex": True}
+
+
+async def test_login_start_rejects_non_https_verification_url(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, replies, _drain = install_setup
+    replies["__login__"] = {"verification_url": "javascript:alert(1)"}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == "host returned an invalid login URL"
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    assert conn.active_harness_logins == {}
+    assert conn.harness_logins == {}
+
+
 async def test_codex_login_start_timeout_sends_cancel_and_clears_busy(
     install_setup: tuple[
         FastAPI,
@@ -1099,6 +1152,56 @@ async def test_codex_login_completion_reports_expired_status(
     }
 
 
+async def test_server_expiry_cancels_host_login(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, replies, _drain = install_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        started = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+        login_id = started.json()["login_id"]
+        conn = registry.get(_HOST_ID)
+        assert conn is not None
+        conn.harness_logins[login_id].expires_at = 0
+        status = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
+
+    assert status.json()["status"] == "expired"
+    assert replies["__cancelled__"] == {login_id: True}
+
+
+async def test_terminal_login_is_pruned_after_grace_period(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, registry, _comm, _replies, _drain = install_setup
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    conn.harness_logins["old-login"] = HarnessLoginState(
+        harness="codex",
+        status="succeeded",
+        expires_at=0,
+        terminal_at=100,
+    )
+    monkeypatch.setattr(hosts_module, "now_epoch", lambda: 401)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/old-login")
+
+    assert response.status_code == 404
+    assert "old-login" not in conn.harness_logins
+
+
 async def test_codex_login_old_host_returns_login_unsupported(
     install_setup: tuple[
         FastAPI,
@@ -1123,7 +1226,8 @@ async def test_codex_login_old_host_returns_login_unsupported(
 async def test_codex_login_route_hidden_when_flag_off(
     install_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
 ) -> None:
-    _app, registry, host_store, conv_store = install_app
+    app, registry, host_store, conv_store = install_app
+    comm = await _connect_mock_host(app, registry)
     off_app = FastAPI()
     off_app.include_router(
         create_hosts_router(
@@ -1134,9 +1238,19 @@ async def test_codex_login_route_hidden_when_flag_off(
         ),
         prefix="/v1",
     )
-    async with AsyncClient(transport=ASGITransport(app=off_app), base_url="http://test") as client:
-        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
-    assert response.status_code == 404
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=off_app), base_url="http://test"
+        ) as client:
+            response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+            listed = (await client.get("/v1/hosts")).json()["hosts"][0]
+            detail = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()
+        assert response.status_code == 404
+        for host_payload in (listed, detail):
+            assert "harness_accounts" not in host_payload
+            assert "harness_login_supported" not in host_payload
+    finally:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
 
 
 async def test_codex_login_offline_host_returns_409(

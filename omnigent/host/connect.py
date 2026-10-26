@@ -151,7 +151,6 @@ from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteU
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_accounts import (
     HARNESS_ACCOUNT_KEYS,
-    harness_account_map,
     probe_harness_account,
 )
 from omnigent.onboarding.harness_auth import (
@@ -1294,6 +1293,9 @@ class HostProcess:
         # write has already produced a fresher snapshot. Capability state is
         # mutated only on the event loop, so no cross-thread lock is needed.
         self._capability_generation = 0
+        # Account probes have their own generation so metadata refreshes neither
+        # discard readiness nor overwrite a newer login/logout result.
+        self._account_generation = 0
         self._active_harness_logins: dict[str, _ActiveHarnessLogin] = {}
         # Consecutive login-page redirects; reset by a successful upgrade.
         self._login_redirect_streak = 0
@@ -3166,6 +3168,12 @@ class HostProcess:
                 status="failed",
                 error=f"readiness refresh failed: {exc}",
             )
+        if configured is None:
+            return HostRefreshHarnessesResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error="readiness refresh failed: configured harnesses are unavailable",
+            )
         return HostRefreshHarnessesResultFrame(
             request_id=frame.request_id,
             status="ok",
@@ -3223,7 +3231,7 @@ class HostProcess:
                 if current is active:
                     self._active_harness_logins.pop(harness, None)
                 await session.close()
-        expires_at = int(time.time()) + 15 * 60
+        expires_at = int(time.time() + HARNESS_LOGIN_COMPLETION_TIMEOUT_S)
         watcher = asyncio.create_task(
             self._watch_harness_login(
                 ws,
@@ -3290,7 +3298,7 @@ class HostProcess:
     async def _handle_harness_login_cancel(
         self, frame: HostHarnessLoginCancelFrame
     ) -> HostHarnessLoginCancelResultFrame:
-        """Cancel a login by its vendor login id."""
+        """Cancel a login by its server-assigned login id."""
         active_pair = next(
             (
                 (harness, active)
@@ -3306,20 +3314,26 @@ class HostProcess:
                 error="login not found",
             )
         harness, active = active_pair
-        self._active_harness_logins.pop(harness, None)
-        if active.vendor_login_id is not None:
-            try:
+        cancel_error: Exception | None = None
+        try:
+            if active.vendor_login_id is not None:
                 await active.session.cancel(active.vendor_login_id)
-            except Exception as exc:  # noqa: BLE001 - vendor failures become protocol errors
-                return HostHarnessLoginCancelResultFrame(
-                    request_id=frame.request_id,
-                    status="failed",
-                    error=f"could not cancel login: {exc}",
-                )
-        active.task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await active.task
-        await active.session.close()
+        except Exception as exc:  # noqa: BLE001 - vendor failures become protocol errors
+            cancel_error = exc
+        finally:
+            active.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await active.task
+            await active.session.close()
+            current = self._active_harness_logins.get(harness)
+            if current is active:
+                self._active_harness_logins.pop(harness, None)
+        if cancel_error is not None:
+            return HostHarnessLoginCancelResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"could not cancel login: {cancel_error}",
+            )
         return HostHarnessLoginCancelResultFrame(
             request_id=frame.request_id,
             status="ok",
@@ -3329,7 +3343,8 @@ class HostProcess:
         self, frame: HostHarnessLogoutFrame
     ) -> HostHarnessLogoutResultFrame:
         """Log Codex or Claude out, then return freshly probed account state."""
-        if frame.harness not in {"codex", "claude"}:
+        harness = harness_account_key(frame.harness)
+        if harness not in {"codex", "claude"}:
             return HostHarnessLogoutResultFrame(
                 request_id=frame.request_id,
                 status="failed",
@@ -3337,7 +3352,7 @@ class HostProcess:
             )
         self._owned_subprocess_ops += 1
         try:
-            if frame.harness == "codex":
+            if harness == "codex":
                 await codex_logout()
             else:
                 await claude_logout()
@@ -3345,7 +3360,7 @@ class HostProcess:
             return HostHarnessLogoutResultFrame(
                 request_id=frame.request_id,
                 status="failed",
-                error=f"{frame.harness} logout failed: {exc}",
+                error=f"{harness} logout failed: {exc}",
             )
         finally:
             self._owned_subprocess_ops -= 1
@@ -3374,10 +3389,9 @@ class HostProcess:
             await active.session.close()
 
     @staticmethod
-    def _fresh_harness_state() -> tuple[dict[str, HarnessAvailability], HarnessAccounts]:
-        """Return independent readiness and informational account metadata."""
-        accounts = harness_account_map()
-        return configured_harness_map(), accounts
+    def _fresh_harness_state() -> tuple[dict[str, HarnessAvailability], None]:
+        """Return readiness immediately; account probes are async and bounded."""
+        return configured_harness_map(), None
 
     def _handle_store_secret(self, frame: HostStoreSecretFrame) -> HostStoreSecretResultFrame:
         """Handle a ``host.store_secret`` request from the server.
@@ -4428,13 +4442,16 @@ class HostProcess:
         accounts: HarnessAccounts | None = None,
     ) -> None:
         """Replace the advisory snapshot and invalidate older probe results."""
+        readiness_changed = configured is not None or gateway is not None
         if configured is not None:
             self._configured_harnesses = dict(configured)
         if gateway is not None:
             self._gateway_inference = dict(gateway)
         if accounts is not None:
             self._harness_accounts = dict(accounts)
-        self._capability_generation += 1
+            self._account_generation += 1
+        if readiness_changed:
+            self._capability_generation += 1
 
     def _start_capability_discovery(self) -> None:
         """Share discovery across reconnects, retrying unexpected initialization errors."""
@@ -5329,8 +5346,13 @@ class HostProcess:
     ) -> None:
         """Publish informational account metadata after connect and every five minutes."""
         while True:
+            generation = self._account_generation
             accounts = await self._probe_harness_accounts(explicit_refresh=False)
-            if accounts is not None and accounts != self._harness_accounts:
+            if (
+                self._account_generation == generation
+                and accounts is not None
+                and accounts != self._harness_accounts
+            ):
                 self._replace_capabilities(None, None, accounts)
                 configured = self._configured_harnesses
                 if configured is not None:
@@ -5560,6 +5582,9 @@ class HostProcess:
                 lambda: self._handle_install_harness(frame)
             )
             if install_result.status == "ok":
+                install_result.harness_accounts = await self._probe_harness_accounts(
+                    explicit_refresh=False
+                )
                 self._replace_capabilities(
                     install_result.configured_harnesses,
                     install_result.gateway_inference,
@@ -5597,6 +5622,9 @@ class HostProcess:
                 lambda: self._handle_store_secret(frame)
             )
             if secret_result.status == "ok":
+                secret_result.harness_accounts = await self._probe_harness_accounts(
+                    explicit_refresh=False
+                )
                 self._replace_capabilities(
                     secret_result.configured_harnesses,
                     secret_result.gateway_inference,

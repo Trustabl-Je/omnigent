@@ -507,7 +507,7 @@ async def test_info_reports_isaac_credential_configuration(
     """The Isaac credential mode supports env, static and per-request values."""
     monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", " ON ")
     env_app = _build_branding_app(db_uri, tmp_path, "isaac-env")
-    monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", "off")
+    monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", "on")
     static_app = _build_branding_app(
         db_uri,
         tmp_path,

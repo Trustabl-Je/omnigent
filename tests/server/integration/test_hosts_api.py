@@ -90,6 +90,8 @@ def host_api_app(
 
 def _build_host_api_app(
     db_uri: str,
+    *,
+    harness_install: bool | None = None,
 ) -> tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore]:
     """Build one replica's app over *db_uri*.
 
@@ -98,6 +100,7 @@ def _build_host_api_app(
     an empty registry.
 
     :param db_uri: SQLite URI from the shared fixture.
+    :param harness_install: Optional harness-repair feature override.
     :returns: Tuple of (app, registry, host_store, conv_store).
     """
     registry = HostRegistry()
@@ -110,7 +113,12 @@ def _build_host_api_app(
         prefix="/v1",
     )
     app.include_router(
-        create_hosts_router(registry, host_store, conv_store),
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            harness_install=harness_install,
+        ),
         prefix="/v1",
     )
 
@@ -341,11 +349,10 @@ async def test_hosts_api_configured_harnesses_null_for_older_host(
 
 
 async def test_harness_accounts_are_live_only_and_login_support_is_explicit(
-    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
     db_uri: str,
 ) -> None:
     """Account PII follows the local tunnel and is never read from the host row."""
-    app, registry, _hs, _cs = host_api_app
+    app, registry, _hs, _cs = _build_host_api_app(db_uri, harness_install=True)
     _comm = await _connect_host(
         app,
         registry,
@@ -361,7 +368,9 @@ async def test_harness_accounts_are_live_only_and_login_support_is_explicit(
     }
     assert connected["harness_login_supported"] is True
 
-    other_app, _other_registry, _other_store, _other_conversations = _build_host_api_app(db_uri)
+    other_app, _other_registry, _other_store, _other_conversations = _build_host_api_app(
+        db_uri, harness_install=True
+    )
     async with AsyncClient(
         transport=ASGITransport(app=other_app), base_url="http://test"
     ) as client:

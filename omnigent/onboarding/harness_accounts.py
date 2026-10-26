@@ -12,7 +12,7 @@ from typing import Any, cast
 
 from omnigent.harness_accounts import HarnessAccount, HarnessAccounts
 from omnigent.inner import _proc
-from omnigent.onboarding.opencode_auth import opencode_auth_summary
+from omnigent.onboarding.opencode_auth import _ENV_PROVIDER_VARS, opencode_auth_summary
 
 _PROBE_TIMEOUT_S = 5.0
 HARNESS_ACCOUNT_KEYS = ("codex", "claude", "pi", "opencode")
@@ -230,10 +230,12 @@ def _claude_account(
         deadline=deadline,
         cancel_event=cancel_event,
     )
-    if payload is None or return_code != 0:
+    if payload is None:
         return {"kind": "unknown"}
     if payload.get("loggedIn") is not True:
         return {"kind": "none"}
+    if return_code != 0:
+        return {"kind": "unknown"}
     nested = payload.get("account")
     source = nested if isinstance(nested, dict) else payload
     auth_method = payload.get("authMethod")
@@ -282,9 +284,14 @@ def _opencode_account() -> HarnessAccount | None:
     providers: list[dict[str, str]] = []
     for provider_id in summary.stored_providers:
         providers.append({"id": provider_id, "label": provider_id, "auth_type": "stored"})
+    provider_ids_by_label = {label: provider_id for provider_id, label, _ in _ENV_PROVIDER_VARS}
     for label in summary.env_providers:
         providers.append(
-            {"id": label.lower().replace(" ", "-"), "label": label, "auth_type": "env"}
+            {
+                "id": provider_ids_by_label.get(label, label.lower()),
+                "label": label,
+                "auth_type": "env",
+            }
         )
     for provider_id in summary.configured_providers:
         providers.append({"id": provider_id, "label": provider_id, "auth_type": "config"})

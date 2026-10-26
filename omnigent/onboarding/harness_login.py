@@ -8,6 +8,7 @@ import json
 import shutil
 from dataclasses import dataclass
 from typing import Any, cast
+from urllib.parse import urlparse
 
 _RPC_TIMEOUT_S = 10.0
 
@@ -53,6 +54,9 @@ class CodexLoginSession:
             or not user_code
         ):
             raise RuntimeError("codex returned incomplete device login details")
+        parsed_verification_url = urlparse(verification_url)
+        if parsed_verification_url.scheme != "https" or not parsed_verification_url.netloc:
+            raise RuntimeError("codex returned an invalid device login URL")
         return CodexDeviceLogin(login_id, verification_url, user_code)
 
     async def start_app_server(self) -> None:
