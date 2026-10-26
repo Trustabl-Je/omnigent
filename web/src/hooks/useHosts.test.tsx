@@ -66,7 +66,13 @@ describe("harness account routes", () => {
         mockResponse({ configured_harnesses: { "codex-native": false }, harness_accounts: {} }),
       );
 
-    await startHarnessLogin("host/1", "codex-native");
+    await expect(startHarnessLogin("host/1", "codex-native")).resolves.toEqual({
+      kind: "started",
+      login_id: "login/1",
+      verification_url: "https://auth.example.test/device",
+      user_code: "ABCD-EFGH",
+      expires_at: 1_798_761_600,
+    });
     await fetchHarnessLogin("host/1", "codex-native", "login/1");
     await cancelHarnessLogin("host/1", "codex-native", "login/1");
     await logoutHarnessOnHost("host/1", "codex-native");
@@ -94,6 +100,18 @@ describe("harness account routes", () => {
       status: 409,
       code: "login_unsupported",
       message: "Update the host.",
+    });
+  });
+
+  it.each([
+    { code: "login_busy", login_id: "busy/1" },
+    { error: { code: "login_busy", login_id: "busy/1" } },
+  ])("returns an active login id from a busy response", async (body) => {
+    fetchMock.mockResolvedValueOnce(mockResponse(body, 409));
+
+    await expect(startHarnessLogin("host_1", "native-codex")).resolves.toEqual({
+      kind: "busy",
+      login_id: "busy/1",
     });
   });
 });

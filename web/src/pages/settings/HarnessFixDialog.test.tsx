@@ -414,6 +414,45 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("resumes and can cancel a busy Codex login", async () => {
+    let loginChecks = 0;
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({ code: "login_busy", login_id: "busy/1" }, { status: 409 });
+      }
+      if (url.endsWith("/login/busy%2F1") && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith("/login/busy%2F1")) {
+        loginChecks += 1;
+        return json({ status: "pending", error: null });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const props = renderDialog({ harness: "native-codex" });
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    expect(
+      await screen.findByText(
+        "Another sign-in is already in progress on Local laptop. Waiting for it to finish…",
+      ),
+    ).toBeVisible();
+    await waitFor(() => expect(loginChecks).toBeGreaterThan(0), { timeout: 4_000 });
+
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).toBeEnabled();
+    await user.click(cancel);
+    expect(authenticatedFetch).toHaveBeenCalledWith(
+      "/v1/hosts/host%2F1/harnesses/codex/login/busy%2F1",
+      { method: "DELETE" },
+    );
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
+  }, 6_000);
+
   it("shows a device-code error and retries", async () => {
     let starts = 0;
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
@@ -489,6 +528,27 @@ describe("HarnessFixDialog", () => {
     expect(authenticatedFetch).toHaveBeenCalledWith("/v1/hosts/host%2F1/harnesses/claude/logout", {
       method: "POST",
     });
+  });
+
+  it("falls back to the copy command when switch logout is unsupported", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/logout") && init?.method === "POST") {
+        return json(
+          { error: { code: "login_unsupported", message: "Update the host." } },
+          { status: 409 },
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog({ mode: "switch", harness: "claude-native", harnessLabel: "Claude Code" });
+
+    await user.click(screen.getByRole("button", { name: "Sign out and switch" }));
+
+    expect(await screen.findByText("claude auth login --claudeai")).toBeVisible();
+    expect(screen.queryByText("Update the host.")).toBeNull();
   });
 
   it("starts Codex device sign-in after switch logout", async () => {

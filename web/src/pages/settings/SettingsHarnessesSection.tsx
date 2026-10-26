@@ -33,7 +33,6 @@ import {
   harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
-  isCodexHarness,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
 import { NATIVE_CODING_AGENTS } from "@/lib/nativeCodingAgents";
@@ -49,8 +48,6 @@ interface HarnessEntry {
   description: string;
   agentName: string;
 }
-
-const CLAUDE_HARNESSES = new Set(["claude", "claude-native", "native-claude"]);
 
 // One-line descriptions per harness, keyed by native slug. The server catalog
 // (/v1/harnesses) carries no descriptions, so these live here; the rest of each
@@ -442,6 +439,9 @@ function configuredAccountLabel(
   host: Host | null,
   harness: string,
 ): string | undefined {
+  if (host?.gateway_inference?.[harness] === true) {
+    return gatewayPresentation(databricksFeatures).label;
+  }
   const account = host?.harness_accounts?.[harnessAccountKey(harness)];
   if (!account) return undefined;
   if (account.kind === "providers") {
@@ -450,6 +450,16 @@ function configuredAccountLabel(
   }
   if (account.kind === "gateway") return HARNESS_CREDENTIAL_COPY.isaac.label;
   return [account.email, account.plan].filter(Boolean).join(" · ") || undefined;
+}
+
+function canSwitchHarnessAccount(host: Host | null, harness: string): boolean {
+  if (host?.harness_login_supported !== true) return false;
+  const accountKey = harnessAccountKey(harness);
+  const kind = host.harness_accounts?.[accountKey]?.kind;
+  return (
+    (accountKey === "codex" && kind === "chatgpt") ||
+    (accountKey === "claude" && kind === "subscription")
+  );
 }
 
 function reconfigurationReason(reason: string | null) {
@@ -725,9 +735,9 @@ function HarnessDetail({
       }
       warning={status.reason === "needs-auth"}
       actionLabel={
-        status.ready && canFix && ["claude-native", "codex-native"].includes(entry.harness)
+        status.ready && canFix && canSwitchHarnessAccount(host, entry.harness)
           ? "Switch account"
-          : status.reason === "needs-auth" && account?.expired
+          : status.reason === "needs-auth" && account?.expired && canFix
             ? "Sign in again"
             : credentialProblem && canFix
               ? "Reconfigure"
@@ -831,13 +841,15 @@ function isCredentialProblem(reason: string | null): boolean {
 
 function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
   const family = harnessCredentialFamily(entry.harness);
-  const credential = isCodexHarness(entry.harness)
-    ? "ChatGPT account or API key"
-    : CLAUDE_HARNESSES.has(entry.harness)
-      ? "Claude subscription or API key"
-      : family !== null
-        ? "API key or gateway credential"
-        : "credential";
+  const accountKey = harnessAccountKey(entry.harness);
+  const credential =
+    accountKey === "codex"
+      ? "ChatGPT account or API key"
+      : accountKey === "claude"
+        ? "Claude subscription or API key"
+        : family !== null
+          ? "API key or gateway credential"
+          : "credential";
   return `No ${credential} on ${host.name}, so new sessions can’t use ${entry.name}.`;
 }
 

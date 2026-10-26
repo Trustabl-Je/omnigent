@@ -31,6 +31,8 @@ export interface Host {
   configured_harnesses?: Record<string, boolean | string> | null;
   /** Non-secret account metadata reported by newer hosts. */
   harness_accounts?: Record<string, HarnessAccount> | null;
+  /** Whether this connected host supports the interactive login/logout routes. */
+  harness_login_supported?: boolean;
   /**
    * Whether each harness family's launch on this host resolves an
    * AI-Gateway-backed inference config, e.g. `{"claude-native": true,
@@ -395,6 +397,9 @@ export interface HarnessLoginStart {
   expires_at: number;
 }
 
+export type HarnessLoginStartResult =
+  ({ kind: "started" } & HarnessLoginStart) | { kind: "busy"; login_id: string };
+
 export interface HarnessLoginStatus {
   status: "pending" | "succeeded" | "failed" | "cancelled" | "expired";
   error?: string | null;
@@ -407,17 +412,53 @@ export interface HarnessLogoutResult {
   harness_accounts: Record<string, HarnessAccount> | null;
 }
 
+function harnessAccountUrl(
+  hostId: string,
+  harness: string,
+  operation: "login" | "logout",
+  loginId?: string,
+): string {
+  const accountKey = harnessAccountKey(harness);
+  const base = `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/${operation}`;
+  return loginId === undefined ? base : `${base}/${encodeURIComponent(loginId)}`;
+}
+
+interface HarnessLoginErrorBody {
+  code?: string;
+  login_id?: string;
+  message?: string;
+  detail?: string;
+  error?: { code?: string; login_id?: string; message?: string };
+}
+
 export async function startHarnessLogin(
   hostId: string,
   harness: string,
-): Promise<HarnessLoginStart> {
-  const accountKey = harnessAccountKey(harness);
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login`,
-    { method: "POST" },
-  );
-  if (!res.ok) throw await apiErrorFromResponse(res);
-  return (await res.json()) as HarnessLoginStart;
+): Promise<HarnessLoginStartResult> {
+  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "login"), {
+    method: "POST",
+  });
+  if (!res.ok) {
+    let body: HarnessLoginErrorBody = {};
+    try {
+      body = (await res.json()) as HarnessLoginErrorBody;
+    } catch {
+      // Keep the status-line fallback for empty/non-JSON responses.
+    }
+    const code = body.error?.code ?? body.code ?? null;
+    const loginId = body.error?.login_id ?? body.login_id;
+    if (res.status === 409 && code === "login_busy" && loginId) {
+      return { kind: "busy", login_id: loginId };
+    }
+    const message =
+      body.error?.message ??
+      body.message ??
+      body.detail ??
+      `${res.status} ${res.statusText}`.trim();
+    throw new ApiError(message, res.status, code);
+  }
+  const login = (await res.json()) as HarnessLoginStart;
+  return { kind: "started", ...login };
 }
 
 export async function fetchHarnessLogin(
@@ -425,10 +466,7 @@ export async function fetchHarnessLogin(
   harness: string,
   loginId: string,
 ): Promise<HarnessLoginStatus> {
-  const accountKey = harnessAccountKey(harness);
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login/${encodeURIComponent(loginId)}`,
-  );
+  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "login", loginId));
   if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as HarnessLoginStatus;
 }
@@ -438,11 +476,9 @@ export async function cancelHarnessLogin(
   harness: string,
   loginId: string,
 ): Promise<void> {
-  const accountKey = harnessAccountKey(harness);
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login/${encodeURIComponent(loginId)}`,
-    { method: "DELETE" },
-  );
+  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "login", loginId), {
+    method: "DELETE",
+  });
   if (!res.ok) throw await apiErrorFromResponse(res);
 }
 
@@ -450,11 +486,9 @@ export async function logoutHarnessOnHost(
   hostId: string,
   harness: string,
 ): Promise<HarnessLogoutResult> {
-  const accountKey = harnessAccountKey(harness);
-  const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/logout`,
-    { method: "POST" },
-  );
+  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "logout"), {
+    method: "POST",
+  });
   if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as HarnessLogoutResult;
 }
