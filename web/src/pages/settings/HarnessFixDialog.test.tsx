@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,19 +12,23 @@ vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
 let isaacCredential: "auto" | "on" | "off" | undefined;
+let serverInfoLoading = false;
 vi.mock("@/lib/CapabilitiesContext", () => ({
-  useServerInfo: () => ({
-    databricks_features: false,
-    isaac_credential: isaacCredential,
-    features: { harness_install: true },
-    installable_harnesses: [
-      "claude-native",
-      "codex-native",
-      "opencode-native",
-      "pi-native",
-      "qwen-native",
-    ],
-  }),
+  useServerInfo: () =>
+    serverInfoLoading
+      ? "loading"
+      : {
+          databricks_features: false,
+          isaac_credential: isaacCredential,
+          features: { harness_install: true },
+          installable_harnesses: [
+            "claude-native",
+            "codex-native",
+            "opencode-native",
+            "pi-native",
+            "qwen-native",
+          ],
+        },
 }));
 
 function json(body: unknown, init: ResponseInit = {}) {
@@ -82,11 +86,15 @@ const baseProps: HarnessFixDialogProps = {
 };
 let dialogQueryClient: QueryClient;
 
-function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
+function renderDialog(
+  overrides: Partial<HarnessFixDialogProps> = {},
+  configureClient?: (client: QueryClient) => void,
+) {
   const props = { ...baseProps, ...overrides };
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  configureClient?.(client);
   dialogQueryClient = client;
   render(
     <QueryClientProvider client={client}>
@@ -97,7 +105,8 @@ function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
 }
 
 beforeEach(() => {
-  isaacCredential = undefined;
+  isaacCredential = "on";
+  serverInfoLoading = false;
   vi.clearAllMocks();
   vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
     const url = String(input);
@@ -837,6 +846,142 @@ describe("HarnessFixDialog", () => {
     },
   );
 
+  it.each([
+    ["without a Databricks entry", [], "Personal subscription"],
+    [
+      "with a Databricks entry",
+      [{ family: "databricks", source: "isaac CLI", env_var: null }],
+      "Isaac",
+    ],
+  ])(
+    "settles the default %s without starting a duplicate update",
+    async (_case, credentials, expectedChoice) => {
+      isaacCredential = "auto";
+      let resolveDetection: ((response: Response) => void) | undefined;
+      const detection = new Promise<Response>((resolve) => {
+        resolveDetection = resolve;
+      });
+      let installRequests = 0;
+      vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url === "/v1/harnesses") return json(catalog);
+        if (url.endsWith("/credentials/detected")) return detection;
+        if (url.endsWith("/install") && init?.method === "POST") {
+          installRequests += 1;
+          return json({
+            object: "harness_install",
+            harness: "codex-native",
+            configured_harnesses: { "codex-native": "needs-auth" },
+            version: "2.0.0",
+          });
+        }
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      renderDialog({ mode: "update" });
+
+      await waitFor(() => expect(installRequests).toBe(1));
+      expect(
+        screen.getByText("Checking which credentials are available on Local laptop…"),
+      ).toBeVisible();
+      expect(screen.queryByRole("radio", { name: /Isaac/ })).toBeNull();
+      await act(async () => resolveDetection?.(json({ credentials })));
+
+      expect(
+        await screen.findByRole("radio", { name: new RegExp(expectedChoice) }),
+      ).toHaveAttribute("aria-checked", "true");
+      await waitFor(() => expect(installRequests).toBe(1));
+    },
+  );
+
+  it("keeps an active device login when background detection resolves", async () => {
+    isaacCredential = "auto";
+    let resolveDetection: ((response: Response) => void) | undefined;
+    const detection = new Promise<Response>((resolve) => {
+      resolveDetection = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return detection;
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({
+          login_id: "active-during-detection",
+          verification_url: "https://auth.example.test/device",
+          user_code: "KEEP-ME",
+          expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
+        });
+      }
+      if (url.endsWith("/login/active-during-detection")) {
+        return json({ status: "pending", error: null });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog({}, (client) => {
+      client.setQueryData(["detected-credentials", "host/1"], []);
+      void client.invalidateQueries({
+        queryKey: ["detected-credentials", "host/1"],
+        refetchType: "none",
+      });
+    });
+
+    expect(screen.getByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    expect(await screen.findByText("KEEP-ME")).toBeVisible();
+
+    await act(async () =>
+      resolveDetection?.(
+        json({
+          credentials: [{ family: "databricks", source: "isaac CLI", env_var: null }],
+        }),
+      ),
+    );
+    expect(screen.getByText("KEEP-ME")).toBeVisible();
+  });
+
+  it("does not request detected credentials until server info has loaded", async () => {
+    serverInfoLoading = true;
+    renderDialog();
+    await Promise.resolve();
+
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.every(([input]) => !String(input).endsWith("/credentials/detected")),
+    ).toBe(true);
+    expect(
+      screen.getByText("Checking which credentials are available on Local laptop…"),
+    ).toBeVisible();
+  });
+
+  it("does not flash an Isaac choice for Pi while automatic detection is pending", async () => {
+    isaacCredential = "auto";
+    let resolveDetection: ((response: Response) => void) | undefined;
+    const detection = new Promise<Response>((resolve) => {
+      resolveDetection = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return detection;
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
+
+    expect(
+      screen.getByText("Checking which credentials are available on Local laptop…"),
+    ).toBeVisible();
+    expect(screen.queryByRole("radio", { name: /Isaac/ })).toBeNull();
+    await act(async () => resolveDetection?.(json({ credentials: [] })));
+
+    expect(await screen.findByText("Use an API key")).toBeVisible();
+    expect(screen.queryByRole("radio", { name: /Isaac/ })).toBeNull();
+  });
+
   it.each(["auto", undefined] as const)(
     "preselects Personal subscription when mode is %s and Databricks is not detected",
     async (mode) => {
@@ -849,13 +994,11 @@ describe("HarnessFixDialog", () => {
       });
       renderDialog();
 
-      await waitFor(() =>
-        expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument(),
-      );
-      expect(screen.getByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+      expect(await screen.findByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
         "aria-checked",
         "true",
       );
+      expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
     },
   );
 

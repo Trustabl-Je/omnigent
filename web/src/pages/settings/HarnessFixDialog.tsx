@@ -105,8 +105,9 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const canonicalHarness = canonicalNativeHarness(harness);
   const accountKey = harnessAccountKey(harness);
   const credentialFamily = harnessCredentialFamily(harness);
-  const isaacMode = info === "loading" ? undefined : info.isaac_credential;
-  const shouldDetectIsaac = isaacMode === undefined || isaacMode === "auto";
+  const serverInfoLoaded = info !== "loading";
+  const isaacMode = serverInfoLoaded ? info.isaac_credential : undefined;
+  const shouldDetectIsaac = serverInfoLoaded && (isaacMode === undefined || isaacMode === "auto");
   const detectedCredentials = useDetectedCredentials(
     hostId,
     open && credentialFamily !== null && shouldDetectIsaac,
@@ -114,24 +115,32 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const loginCommand = useMemo(() => {
     if (accountKey === "codex") return "codex login --device-auth";
     if (accountKey === "pi") return null;
-    return setupSteps[canonicalHarness]?.find((step) => step.kind === "auth")?.command ?? null;
+    const configuredCommand = setupSteps[canonicalHarness]?.find(
+      (step) => step.kind === "auth",
+    )?.command;
+    if (accountKey === "claude") return configuredCommand ?? "claude auth login --claudeai";
+    return configuredCommand ?? null;
   }, [accountKey, canonicalHarness, setupSteps]);
   const isaacSupported =
     credentialFamily !== null &&
     (isaacMode === "on" ||
       (shouldDetectIsaac &&
         (detectedCredentials.isError ||
-          detectedCredentials.data === undefined ||
-          detectedCredentials.data.some((credential) => credential.family === "databricks"))));
+          detectedCredentials.data?.some((credential) => credential.family === "databricks") ===
+            true)));
+  const credentialDecisionPending =
+    credentialFamily !== null &&
+    (!serverInfoLoaded || (shouldDetectIsaac && detectedCredentials.isPending));
   const personalSupported =
     loginCommand !== null && (accountKey === "codex" || accountKey === "claude");
   const hasCredentialCards = isaacSupported || personalSupported;
   const canUseCredentialForm = harnessAuthableOnHost(info, harness, host);
-  const credentialChoicePhase: Phase = hasCredentialCards
-    ? "choose"
-    : canUseCredentialForm
-      ? "credentials"
-      : "setup";
+  const credentialChoicePhase: Phase =
+    credentialDecisionPending || hasCredentialCards
+      ? "choose"
+      : canUseCredentialForm
+        ? "credentials"
+        : "setup";
   const installable = harnessInstallableOnHost(info, harness, host);
   const requiresManualSetup = !installable && (mode === "install" || mode === "update");
   const initialPhase: Phase =
@@ -146,9 +155,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
             : credentialChoicePhase;
 
   const [phase, setPhase] = useState<Phase>(initialPhase);
-  const [choice, setChoice] = useState<HarnessCredentialKind>(
-    isaacSupported ? "isaac" : "personal",
-  );
+  const [choice, setChoice] = useState<HarnessCredentialKind>("personal");
   const [error, setError] = useState("");
   const [stillNotReady, setStillNotReady] = useState(false);
   const [updatedNeedsSetup, setUpdatedNeedsSetup] = useState(false);
@@ -158,6 +165,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const [deviceLogin, setDeviceLogin] = useState<DeviceLoginState>(null);
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const runId = useRef(0);
+  const credentialDefaultSettled = useRef(false);
+  const initialPhaseRef = useRef(initialPhase);
+  initialPhaseRef.current = initialPhase;
+  const installableRef = useRef(installable);
+  installableRef.current = installable;
 
   const finish = useCallback(
     ({
@@ -287,19 +299,41 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   useEffect(() => {
     if (!open) return;
     runId.current += 1;
-    setChoice(isaacSupported ? "isaac" : "personal");
+    credentialDefaultSettled.current = false;
+    setChoice("personal");
     setError("");
     setStillNotReady(false);
     setUpdatedNeedsSetup(false);
     setChecking(false);
     setEmailHint("");
     setDeviceLogin(null);
-    setPhase(initialPhase);
-    if (mode === "update" && installable) void startRef.current();
+    setPhase(initialPhaseRef.current);
+    if (mode === "update" && installableRef.current) void startRef.current();
     return () => {
       runId.current += 1;
     };
-  }, [harness, hostId, initialPhase, installable, isaacSupported, mode, open]);
+  }, [harness, hostId, mode, open]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      phase !== "choose" ||
+      credentialDecisionPending ||
+      credentialDefaultSettled.current
+    ) {
+      return;
+    }
+    credentialDefaultSettled.current = true;
+    setChoice(isaacSupported ? "isaac" : "personal");
+    if (!hasCredentialCards) setPhase(canUseCredentialForm ? "credentials" : "setup");
+  }, [
+    canUseCredentialForm,
+    credentialDecisionPending,
+    hasCredentialCards,
+    isaacSupported,
+    open,
+    phase,
+  ]);
 
   const setOpen = (nextOpen: boolean) => {
     if (!nextOpen) runId.current += 1;
@@ -520,6 +554,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
             <DialogDescription>
               Install {harnessLabel} on {hostName}.
             </DialogDescription>
+          ) : phase === "choose" && credentialDecisionPending ? (
+            <CredentialDetectionState hostName={hostName} />
           ) : phase === "choose" ? (
             <ChooseCredential
               choice={choice}
@@ -599,8 +635,20 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
               <Button variant="outline" onClick={() => setOpen(false)}>
                 Cancel
               </Button>
-              <Button onClick={() => (mode === "install" ? void start() : authenticate(choice))}>
-                {mode === "install" ? "Install" : "Authenticate"}
+              <Button
+                disabled={credentialDecisionPending}
+                onClick={() => (mode === "install" ? void start() : authenticate(choice))}
+              >
+                {credentialDecisionPending ? (
+                  <>
+                    <Loader2Icon className="size-4 animate-spin" />
+                    Checking…
+                  </>
+                ) : mode === "install" ? (
+                  "Install"
+                ) : (
+                  "Authenticate"
+                )}
               </Button>
             </>
           ) : phase === "error" ? (
@@ -871,6 +919,17 @@ function ChooseCredential({
         </button>
       )}
     </>
+  );
+}
+
+function CredentialDetectionState({ hostName }: { hostName: string }) {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-muted/40 px-4 py-3">
+      <Loader2Icon aria-label="Checking credentials" className="size-4 shrink-0 animate-spin" />
+      <p className="text-sm text-muted-foreground">
+        Checking which credentials are available on {hostName}…
+      </p>
+    </div>
   );
 }
 
