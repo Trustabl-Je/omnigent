@@ -1059,7 +1059,9 @@ describe("Composer slash-command menu", () => {
   it.each(["claude-native", "codex-native"] as const)(
     "%s /clear runs the clear control when the server accepts it",
     (harness) => {
-      const { clearContext, onSend } = renderClearComposer(harness, { clear_event: true });
+      const { clearContext, onSend } = renderClearComposer(harness, {
+        session_event_types: ["message", "clear"],
+      });
       fireEvent.click(screen.getByTestId("slash-menu-item-clear"));
       expect(clearContext).toHaveBeenCalledOnce();
       expect(onSend).not.toHaveBeenCalled();
@@ -1068,7 +1070,7 @@ describe("Composer slash-command menu", () => {
 
   it.each([
     ["claude-native", {}],
-    ["claude-native", { clear_event: false }],
+    ["claude-native", { session_event_types: ["message"] }],
     ["codex-native", {}],
     ["claude-native", "loading"],
   ] as const)("%s sends a typed /clear as text when server info is %o", (harness, advertised) => {

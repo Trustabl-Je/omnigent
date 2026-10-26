@@ -218,9 +218,18 @@ describe("resolveServerInfo request_managed_sandbox_host_id", () => {
   });
 });
 
-describe("resolveServerInfo clear_event", () => {
-  it.each([undefined, false, "true", true])("parses %s strictly", async (advertised) => {
-    expect((await probe({ clear_event: advertised })).clear_event).toBe(advertised === true);
+describe("resolveServerInfo session_event_types", () => {
+  it.each([
+    [undefined, []],
+    ["clear", []],
+    [
+      ["message", 1, "clear"],
+      ["message", "clear"],
+    ],
+  ])("parses %o as %o", async (advertised, expected) => {
+    expect((await probe({ session_event_types: advertised })).session_event_types).toEqual(
+      expected,
+    );
   });
 });
 

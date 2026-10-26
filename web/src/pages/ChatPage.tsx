@@ -2866,7 +2866,7 @@ function ComposerImpl(
   const showClear =
     (sessionHarness === "claude-native" || sessionHarness === "codex-native") &&
     composerServerInfo !== "loading" &&
-    composerServerInfo.clear_event === true;
+    !!composerServerInfo.session_event_types?.includes("clear");
   // /btw is a Claude Code CLI built-in (side chat), so offer it only on
   // claude-native sessions. Selected/typed, it sends as plaintext to the
   // vendor TUI (see submit) — the forwarder relays its answer to the overlay.

@@ -18,6 +18,7 @@ from fastapi import FastAPI
 
 from omnigent.server.app import ServerInfoResponse
 from omnigent.server.feature_flags import Feature, FeatureFlags
+from omnigent.server.routes.sessions import _ALLOWED_EVENT_TYPES
 from omnigent.stores.agent_store import AgentStore
 
 pytestmark = pytest.mark.asyncio
@@ -113,7 +114,8 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert data["agent_detail"] is True
     assert data["agent_config_edit"] is True
     # Gates the web's /clear for native sessions; older servers reject it.
-    assert data["clear_event"] is True
+    assert data["session_event_types"] == sorted(_ALLOWED_EVENT_TYPES)
+    assert "clear" in data["session_event_types"]
     # single_user reflects OMNIGENT_LOCAL_SINGLE_USER, which the suite's
     # conftest sets to "1" (the default local-dev posture), so it's true here.
     # The multi-user (marker-off) case is covered below.
@@ -124,8 +126,8 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert ServerInfoResponse.model_validate(data).agent_detail is False
     del data["agent_config_edit"]
     assert ServerInfoResponse.model_validate(data).agent_config_edit is False
-    del data["clear_event"]
-    assert ServerInfoResponse.model_validate(data).clear_event is False
+    del data["session_event_types"]
+    assert ServerInfoResponse.model_validate(data).session_event_types == []
 
 
 async def test_info_disables_config_edit_for_unsupported_store(

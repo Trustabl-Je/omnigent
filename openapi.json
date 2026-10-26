@@ -5856,11 +5856,6 @@
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },
-          "clear_event": {
-            "default": false,
-            "title": "Clear Event",
-            "type": "boolean"
-          },
           "databricks_features": {
             "title": "Databricks Features",
             "type": "boolean"
@@ -5978,6 +5973,14 @@
           "server_version": {
             "title": "Server Version",
             "type": "string"
+          },
+          "session_event_types": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Session Event Types",
+            "type": "array"
           },
           "session_search_scope": {
             "default": true,
