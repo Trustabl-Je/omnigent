@@ -826,6 +826,9 @@ describe("HarnessFixDialog", () => {
     renderDialog({ harness, harnessLabel });
 
     expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
+    if (harness === "pi-native") {
+      expect(screen.queryByRole("radio", { name: /Personal subscription/ })).toBeNull();
+    }
     expect(
       vi
         .mocked(authenticatedFetch)

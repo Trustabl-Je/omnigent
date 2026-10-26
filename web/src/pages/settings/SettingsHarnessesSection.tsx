@@ -29,10 +29,10 @@ import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
 import {
   HARNESS_CREDENTIAL_COPY,
-  harnessCredentialFamily,
   harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
+  missingHarnessCredentialCopy,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
 import { NATIVE_CODING_AGENTS } from "@/lib/nativeCodingAgents";
@@ -662,7 +662,7 @@ function HarnessDetail({
 }) {
   const status = harnessStatus(entry.harness, host);
   const credentialProblem = isCredentialProblem(status.reason);
-  const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
+  const mode = fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
   const account = host?.harness_accounts?.[harnessAccountKey(entry.harness)];
@@ -717,28 +717,26 @@ function HarnessDetail({
         account?.expired && credentialProblem
           ? credential.description
           : credentialProblem && host
-            ? missingCredentialCopy(entry, host)
+            ? missingHarnessCredentialCopy(entry.harness, entry.name, host.name)
             : credential.description
       }
       ready={status.ready}
-      actionable={credentialProblem && canFix}
+      warning={credentialProblem}
       showStatus={canSetup}
       statusLabel={
         status.reason === "binary-missing" || status.reason === "unconfigured"
           ? reconfigurationReason(status.reason)
           : "Needs reconfiguration"
       }
-      warning={status.reason === "needs-auth"}
-      actionLabel={
+      action={
         status.ready && canFix && canSwitchHarnessAccount(host, entry.harness)
-          ? "Switch account"
+          ? { label: "Switch account", onClick: () => onFix("switch") }
           : status.reason === "needs-auth" && account?.expired && canFix
-            ? "Sign in again"
+            ? { label: "Sign in again", onClick: () => onFix(mode) }
             : credentialProblem && canFix
-              ? "Reconfigure"
+              ? { label: "Reconfigure", onClick: () => onFix(mode) }
               : undefined
       }
-      onClick={() => onFix(status.ready ? "switch" : mode)}
     />
   );
   const settings = host ? (
@@ -834,20 +832,6 @@ function isCredentialProblem(reason: string | null): boolean {
   return reason === "needs-auth";
 }
 
-function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
-  const family = harnessCredentialFamily(entry.harness);
-  const accountKey = harnessAccountKey(entry.harness);
-  const credential =
-    accountKey === "codex"
-      ? "ChatGPT account or API key"
-      : accountKey === "claude"
-        ? "Claude subscription or API key"
-        : family !== null
-          ? "API key or gateway credential"
-          : "credential";
-  return `No ${credential} on ${host.name}, so new sessions can’t use ${entry.name}.`;
-}
-
 function MachineField({ host }: { host: Host }) {
   return (
     <div className="mt-6 grid max-w-xl grid-cols-[8rem_1fr] items-center gap-3">
@@ -877,11 +861,9 @@ function HarnessWarning({
   const copy =
     reason === "readiness-error"
       ? `${entry.name} isn’t working on ${host.name}. Run setup again to fix it.`
-      : mode === "reconfigure"
-        ? `${entry.name} can’t sign in on ${host.name}. Its credential is missing, so new sessions can’t use ${entry.name}.`
-        : mode === "update"
-          ? `${entry.name} is out of date on ${host.name}. Update it so new sessions can use ${entry.name}.`
-          : `${entry.name} isn’t set up on ${host.name}, so new sessions can’t use ${entry.name}.`;
+      : mode === "update"
+        ? `${entry.name} is out of date on ${host.name}. Update it so new sessions can use ${entry.name}.`
+        : `${entry.name} isn’t set up on ${host.name}, so new sessions can’t use ${entry.name}.`;
   const action = !installable
     ? "Set up"
     : mode === "update"
@@ -1039,21 +1021,17 @@ function CredentialCard({
   description,
   ready,
   warning,
-  actionable,
   showStatus,
   statusLabel,
-  onClick,
-  actionLabel,
+  action,
 }: {
   label: string;
   description: string;
   ready: boolean;
   warning: boolean;
-  actionable: boolean;
   showStatus: boolean;
   statusLabel: string;
-  onClick: () => void;
-  actionLabel?: string;
+  action?: { label: string; onClick: () => void };
 }) {
   const body = (
     <>
@@ -1079,10 +1057,10 @@ function CredentialCard({
         </span>
         <span className="text-xs text-muted-foreground">{description}</span>
       </span>
-      {actionLabel ? (
-        <Button size="sm" className="pointer-events-auto relative z-10" onClick={onClick}>
-          {actionLabel}
-        </Button>
+      {action ? (
+        <span className="inline-flex h-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary px-2.5 text-ui text-primary-foreground">
+          {action.label}
+        </span>
       ) : showStatus ? (
         <span
           className={cn(
@@ -1100,25 +1078,20 @@ function CredentialCard({
       <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Credential
       </h2>
-      {actionable ? (
-        <div
+      {action ? (
+        <button
+          type="button"
+          aria-label={action.label}
           className={cn(
-            "relative w-full rounded-xl border p-3 transition-colors",
+            "flex w-full cursor-pointer items-center gap-3 rounded-xl border p-3 text-left transition-colors focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none",
             warning
               ? "border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15"
               : "border-border hover:bg-muted/50",
           )}
+          onClick={action.onClick}
         >
-          <button
-            type="button"
-            aria-label="Reconfigure credential"
-            aria-hidden
-            tabIndex={-1}
-            className="absolute inset-0 rounded-xl focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-            onClick={onClick}
-          />
-          <div className="pointer-events-none relative flex items-center gap-3">{body}</div>
-        </div>
+          {body}
+        </button>
       ) : (
         <div
           className={cn(
