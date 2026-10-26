@@ -124,7 +124,7 @@ def _codex_account(*, refresh_token: bool = False) -> HarnessAccount | None:
         result = rpc.request("account/read", {"refreshToken": refresh_token})
         raw_account = result.get("account")
         if raw_account is None:
-            return {"kind": "unknown", "expired": True}
+            return {"kind": "none"}
         if not isinstance(raw_account, dict):
             return {"kind": "unknown"}
         account_type = raw_account.get("type")

@@ -202,6 +202,7 @@ async def install_setup(
             if isinstance(frame, HostHarnessLoginFrame):
                 reply = replies.get("__login__", {})
                 replies.setdefault("__started__", {})[frame.login_id] = True
+                replies.setdefault("__login_harnesses__", {})[frame.harness] = True
                 if reply.get("drop"):
                     continue
                 await comm.send_input(
@@ -846,6 +847,34 @@ async def test_codex_login_busy_and_cancel(
             "error": None,
             "expired": False,
         }
+
+
+async def test_codex_native_login_uses_canonical_host_family(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, _registry, _comm, replies, _drain = install_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        started = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/login")
+        assert started.status_code == 200
+        login_id = started.json()["login_id"]
+        pending = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/login/{login_id}")
+        cancelled = await client.delete(
+            f"/v1/hosts/{_HOST_ID}/harnesses/codex-native/login/{login_id}"
+        )
+
+    assert replies["__login_harnesses__"] == {"codex": True}
+    assert pending.json() == {"status": "pending", "error": None, "expired": False}
+    assert cancelled.json() == {
+        "status": "cancelled",
+        "error": None,
+        "expired": False,
+    }
 
 
 async def test_codex_login_start_timeout_sends_cancel_and_clears_busy(

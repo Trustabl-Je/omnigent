@@ -252,13 +252,15 @@ for line in sys.stdin:
     monkeypatch.setenv("PATH", str(bin_dir))
     monkeypatch.setenv("REFRESH_CALLS", str(calls))
 
-    harness_accounts.harness_account_map()
-    harness_accounts.harness_account_map(refresh_codex=True)
+    background = harness_accounts.harness_account_map()
+    refreshed = harness_accounts.harness_account_map(refresh_codex=True)
 
     assert [json.loads(line) for line in calls.read_text().splitlines()] == [
         {"refreshToken": False},
         {"refreshToken": True},
     ]
+    assert background["codex"] == {"kind": "none"}
+    assert refreshed["codex"] == {"kind": "none"}
 
 
 def test_inconclusive_and_logged_out_probes_are_not_expired(

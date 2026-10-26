@@ -59,7 +59,11 @@ from omnigent.errors import (
 )
 from omnigent.gateway_inference import gateway_inference_map
 from omnigent.harness_accounts import HarnessAccounts
-from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
+from omnigent.harness_aliases import (
+    canonicalize_harness,
+    harness_account_key,
+    is_claude_sdk_harness_name,
+)
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.daemon_lifecycle import DaemonLifecycleLock
@@ -3176,14 +3180,15 @@ class HostProcess:
         frame: HostHarnessLoginFrame,
     ) -> HostHarnessLoginResultFrame:
         """Start Codex device login and retain its app-server until completion."""
-        if frame.harness != "codex":
+        harness = harness_account_key(frame.harness)
+        if harness != "codex":
             return HostHarnessLoginResultFrame(
                 request_id=frame.request_id,
                 status="failed",
                 error="only codex supports device login",
             )
-        if frame.harness in self._active_harness_logins:
-            active = self._active_harness_logins[frame.harness]
+        if harness in self._active_harness_logins:
+            active = self._active_harness_logins[harness]
             return HostHarnessLoginResultFrame(
                 request_id=frame.request_id,
                 status="busy",
@@ -3197,7 +3202,7 @@ class HostProcess:
             session=session,
             task=task,
         )
-        self._active_harness_logins[frame.harness] = active
+        self._active_harness_logins[harness] = active
         self._owned_subprocess_ops += 1
         try:
             login = await asyncio.wait_for(session.start(), timeout=HARNESS_LOGIN_START_TIMEOUT_S)
@@ -3214,16 +3219,15 @@ class HostProcess:
         finally:
             self._owned_subprocess_ops -= 1
             if active.vendor_login_id is None:
-                current = self._active_harness_logins.get(frame.harness)
+                current = self._active_harness_logins.get(harness)
                 if current is active:
-                    self._active_harness_logins.pop(frame.harness, None)
-                if sys.exc_info()[0] is not None:
-                    await session.close()
+                    self._active_harness_logins.pop(harness, None)
+                await session.close()
         expires_at = int(time.time()) + 15 * 60
         watcher = asyncio.create_task(
             self._watch_harness_login(
                 ws,
-                frame.harness,
+                harness,
                 frame.login_id,
                 login.login_id,
                 session,
@@ -5534,7 +5538,9 @@ class HostProcess:
         elif isinstance(frame, HostStoreSecretFrame):
             # The credential write touches the OS keychain / config file, so run
             # it off the event loop and reply when it completes.
-            secret_result = await asyncio.to_thread(self._handle_store_secret, frame)
+            secret_result = await self._run_host_subprocess_in_thread(
+                lambda: self._handle_store_secret(frame)
+            )
             if secret_result.status == "ok":
                 self._replace_capabilities(
                     secret_result.configured_harnesses,

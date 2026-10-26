@@ -1690,8 +1690,10 @@ def create_hosts_router(
         """Start a Codex device-code login on a connected host."""
         if not flags.enabled(Feature.HARNESS_INSTALL):
             raise HTTPException(status_code=404, detail="not found")
-        if harness_account_key(harness) != "codex":
+        harness_key = harness_account_key(harness)
+        if harness_key != "codex":
             raise HTTPException(status_code=400, detail="device login is supported only for codex")
+        harness = harness_key
         _host, conn = await _connected_owned_host(
             request=request,
             host_id=host_id,
@@ -1780,6 +1782,7 @@ def create_hosts_router(
         """Return the current device-login status without exposing its code."""
         if not flags.enabled(Feature.HARNESS_INSTALL):
             raise HTTPException(status_code=404, detail="not found")
+        harness = harness_account_key(harness) or harness
         _host, conn = await _connected_owned_host(
             request=request,
             host_id=host_id,
@@ -1817,6 +1820,7 @@ def create_hosts_router(
         """Cancel an active device login."""
         if not flags.enabled(Feature.HARNESS_INSTALL):
             raise HTTPException(status_code=404, detail="not found")
+        harness = harness_account_key(harness) or harness
         _host, conn = await _connected_owned_host(
             request=request,
             host_id=host_id,

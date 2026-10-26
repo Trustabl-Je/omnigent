@@ -5081,7 +5081,7 @@ async def test_dispatch_codex_login_start_and_cancel(
 
     await host._dispatch_host_frame(  # type: ignore[arg-type]
         tunnel,
-        HostHarnessLoginFrame(request_id="start-1", harness="codex", login_id="login-1"),
+        HostHarnessLoginFrame(request_id="start-1", harness="codex-native", login_id="login-1"),
     )
     started = decode_host_frame(tunnel.sent.pop())
     assert isinstance(started, HostHarnessLoginResultFrame)
@@ -5098,6 +5098,61 @@ async def test_dispatch_codex_login_start_and_cancel(
     assert cancelled.status == "ok"
     assert _FakeLoginSession.cancelled == ["login-1"]
     assert host._active_harness_logins == {}
+
+
+@pytest.mark.parametrize("start_outcome", ["failure", "timeout"])
+async def test_failed_codex_login_start_closes_app_server(
+    monkeypatch: pytest.MonkeyPatch,
+    start_outcome: str,
+) -> None:
+    """A failed or timed-out start always terminates its spawned app-server."""
+    import omnigent.host.connect as connect
+
+    class _FailingLoginSession(connect.CodexLoginSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.child: asyncio.subprocess.Process | None = None
+            sessions.append(self)
+
+        async def start(self) -> CodexDeviceLogin:
+            self.child = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                "import time; time.sleep(60)",
+            )
+            self._process = self.child
+            if start_outcome == "failure":
+                raise RuntimeError("start failed")
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    sessions: list[_FailingLoginSession] = []
+    monkeypatch.setattr(connect, "CodexLoginSession", _FailingLoginSession)
+    monkeypatch.setattr(connect, "HARNESS_LOGIN_START_TIMEOUT_S", 0.01)
+    host = _make_host_process()
+
+    result = await host._handle_harness_login(  # type: ignore[arg-type]
+        _FakeTunnel(),
+        HostHarnessLoginFrame(
+            request_id=f"start-{start_outcome}",
+            harness="codex",
+            login_id=f"login-{start_outcome}",
+        ),
+    )
+
+    assert result.status == "failed"
+    assert len(sessions) == 1
+    child = sessions[0].child
+    assert child is not None
+    try:
+        assert child.returncode is not None
+        assert child.pid not in host._tracked_runner_pids()
+        assert host._active_harness_logins == {}
+        assert host._owned_subprocess_ops == 0
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
 
 
 async def test_disconnect_mid_login_start_closes_session_and_clears_busy(
@@ -5155,6 +5210,38 @@ async def test_disconnect_mid_login_start_closes_session_and_clears_busy(
     assert closed.is_set()
     assert host._owned_subprocess_ops == 0
     assert host._active_harness_logins == {}
+
+
+async def test_dispatch_store_secret_uses_orphan_reaper_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Credential writes and their account probes run inside the subprocess guard."""
+    host = _make_host_process()
+    guarded: list[Callable[[], HostStoreSecretResultFrame]] = []
+    expected = HostStoreSecretResultFrame(request_id="secret-guard", status="ok")
+
+    async def _guard(
+        operation: Callable[[], HostStoreSecretResultFrame],
+    ) -> HostStoreSecretResultFrame:
+        guarded.append(operation)
+        return operation()
+
+    monkeypatch.setattr(host, "_run_host_subprocess_in_thread", _guard)
+    monkeypatch.setattr(host, "_handle_store_secret", lambda frame: expected)
+    tunnel = _FakeTunnel()
+
+    await host._dispatch_host_frame(  # type: ignore[arg-type]
+        tunnel,
+        HostStoreSecretFrame(
+            request_id="secret-guard",
+            harness="codex",
+            kind="key",
+            secret_value="not-used",
+        ),
+    )
+
+    assert len(guarded) == 1
+    assert decode_host_frame(tunnel.sent[0]) == expected
 
 
 def test_handle_install_harness_success_returns_refreshed_readiness(
