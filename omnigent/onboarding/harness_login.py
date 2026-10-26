@@ -32,6 +32,11 @@ class CodexLoginSession:
         self._events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self._next_id = 1
 
+    @property
+    def pid(self) -> int | None:
+        """Return the app-server PID while this session owns one."""
+        return self._process.pid if self._process is not None else None
+
     async def start(self) -> CodexDeviceLogin:
         """Spawn, initialize, and begin a ChatGPT device-code login."""
         await self.start_app_server()

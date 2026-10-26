@@ -41,7 +41,6 @@ from omnigent.db.utils import (
 )
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
-from omnigent.onboarding.harness_accounts import HarnessAccounts, normalize_harness_accounts
 
 # A host is considered live only if its row was touched (connect or
 # heartbeat) within this window. The host tunnel's ping loop writes a
@@ -105,7 +104,6 @@ class Host:
     sandbox_provider: str | None = None
     sandbox_id: str | None = None
     configured_harnesses: dict[str, HarnessAvailability] | None = None
-    harness_accounts: HarnessAccounts | None = None
     terminating_sandbox_id: str | None = None
     deleted_at: int | None = None
     account_generation: str | None = None
@@ -164,17 +162,6 @@ def _parse_configured_harnesses(raw: str | None) -> dict[str, HarnessAvailabilit
     return {k: v for k, v in parsed.items() if isinstance(k, str) and is_harness_availability(v)}
 
 
-def _parse_harness_accounts(raw: str | None) -> HarnessAccounts | None:
-    """Parse the non-secret account metadata stored with host readiness."""
-    if raw is None:
-        return None
-    try:
-        return normalize_harness_accounts(json.loads(raw))
-    except json.JSONDecodeError:
-        _logger.warning("Ignoring malformed hosts.harness_accounts value")
-        return None
-
-
 def _row_to_host(row: SqlHost) -> Host:
     """
     Convert a :class:`SqlHost` ORM row to a :class:`Host` entity.
@@ -195,7 +182,6 @@ def _row_to_host(row: SqlHost) -> Host:
         deleted_at=row.deleted_at,
         account_generation=row.account_generation,
         configured_harnesses=_parse_configured_harnesses(row.configured_harnesses),
-        harness_accounts=_parse_harness_accounts(row.harness_accounts),
     )
 
 
@@ -285,7 +271,6 @@ class HostStore:
         *,
         allow_host_id_reown: bool = False,
         configured_harnesses: dict[str, HarnessAvailability] | None = None,
-        harness_accounts: HarnessAccounts | None = None,
         managed_token: str | None = None,
     ) -> Host:
         """
@@ -335,7 +320,6 @@ class HostStore:
         harnesses_json = (
             json.dumps(configured_harnesses) if configured_harnesses is not None else None
         )
-        accounts_json = json.dumps(harness_accounts) if harness_accounts is not None else None
 
         def write(session: Session) -> Host:
             generation = require_active_account(session, user_id)
@@ -359,7 +343,6 @@ class HostStore:
                             status=encode_host_status("online"),
                             updated_at=now,
                             configured_harnesses=harnesses_json,
-                            harness_accounts=accounts_json,
                         )
                     ),
                 )
@@ -392,7 +375,6 @@ class HostStore:
                 row.status = encode_host_status("online")
                 row.updated_at = now
                 row.configured_harnesses = harnesses_json
-                row.harness_accounts = accounts_json
                 return _row_to_host(row)
 
             # host_id is new — check whether (workspace_id, user_id, name)
@@ -409,7 +391,6 @@ class HostStore:
                     generation=generation,
                     now=now,
                     configured_harnesses_json=harnesses_json,
-                    harness_accounts_json=accounts_json,
                 )
                 if reowned is not None:
                     return reowned
@@ -433,7 +414,6 @@ class HostStore:
                     host_id,
                     now,
                     harnesses_json,
-                    accounts_json,
                 )
                 return _row_to_host(row)
 
@@ -447,7 +427,6 @@ class HostStore:
                 created_at=now,
                 updated_at=now,
                 configured_harnesses=harnesses_json,
-                harness_accounts=accounts_json,
             )
             session.add(row)
             return _row_to_host(row)
@@ -468,7 +447,6 @@ class HostStore:
         new_host_id: str,
         now: int,
         harnesses_json: str | None,
-        accounts_json: str | None,
     ) -> SqlHost:
         """Replace a host row's host_id while repointing its conversations.
 
@@ -546,7 +524,6 @@ class HostStore:
             sandbox_id=sandbox_id,
             terminating_sandbox_id=terminating_sandbox_id,
             configured_harnesses=harnesses_json,
-            harness_accounts=accounts_json,
         )
         session.add(new_row)
         session.flush()
@@ -574,7 +551,6 @@ class HostStore:
         generation: str | None,
         now: int,
         configured_harnesses_json: str | None = None,
-        harness_accounts_json: str | None = None,
     ) -> Host | None:
         """Re-own an existing host_id row under a new ``(user_id, name)``.
 
@@ -626,7 +602,6 @@ class HostStore:
                 status=encode_host_status("online"),
                 updated_at=now,
                 configured_harnesses=configured_harnesses_json,
-                harness_accounts=harness_accounts_json,
             )
         )
         return Host(
@@ -640,7 +615,6 @@ class HostStore:
             sandbox_provider=existing.sandbox_provider,
             sandbox_id=existing.sandbox_id,
             configured_harnesses=_parse_configured_harnesses(configured_harnesses_json),
-            harness_accounts=_parse_harness_accounts(harness_accounts_json),
         )
 
     def set_offline(self, host_id: str, *, cancelled: Callable[[], bool] | None = None) -> None:
@@ -678,7 +652,6 @@ class HostStore:
         self,
         host_id: str,
         configured_harnesses: dict[str, HarnessAvailability],
-        harness_accounts: HarnessAccounts | None = None,
     ) -> None:
         """Replace a connected host's live per-harness readiness map.
 
@@ -686,7 +659,6 @@ class HostStore:
         :param configured_harnesses: Current readiness keyed by harness spelling.
         """
         harnesses_json = json.dumps(configured_harnesses)
-        accounts_json = json.dumps(harness_accounts) if harness_accounts is not None else None
         updated_at = now_epoch()
 
         def write(session: Session) -> None:
@@ -699,7 +671,6 @@ class HostStore:
                 )
                 .values(
                     configured_harnesses=harnesses_json,
-                    harness_accounts=accounts_json,
                     updated_at=updated_at,
                 )
             )

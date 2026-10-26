@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
+from omnigent import harness_accounts as account_types
 from omnigent.onboarding import harness_accounts, harness_login
+from omnigent.onboarding.opencode_auth import OpenCodeAuthSummary
 
 
 def _executable(path: Path, body: str) -> None:
@@ -42,7 +44,6 @@ for line in sys.stdin:
             "kind": "chatgpt",
             "email": "person@example.test",
             "plan": "pro",
-            "expired": False,
         }
     }
 
@@ -141,12 +142,10 @@ else:
         "email": "claude@example.test",
         "org": "Example",
         "plan": "max",
-        "expired": False,
     }
     assert accounts["pi"] == {
         "kind": "providers",
         "providers": [{"id": "anthropic", "label": "Anthropic", "auth_type": "oauth"}],
-        "expired": False,
     }
 
 
@@ -179,40 +178,15 @@ def test_opencode_probe_returns_only_non_secret_metadata(
     assert account == {
         "kind": "providers",
         "providers": [
-            {"id": "anthropic", "label": "anthropic", "auth_type": "api"},
-            {"id": "github", "label": "github", "auth_type": "oauth"},
+            {"id": "anthropic", "label": "anthropic", "auth_type": "stored"},
+            {"id": "github", "label": "github", "auth_type": "stored"},
         ],
-        "expired": True,
     }
     assert "must-not-leak" not in json.dumps(account)
 
 
-def test_expired_accounts_flip_ready_spellings_to_needs_auth() -> None:
-    configured = {
-        "codex": True,
-        "codex-native": True,
-        "claude-native": "version-too-low",
-        "qwen": True,
-    }
-
-    result = harness_accounts.apply_accounts_to_readiness(
-        configured,
-        {
-            "codex": {"kind": "unknown", "expired": True},
-            "claude": {"kind": "unknown", "expired": True},
-        },
-    )
-
-    assert result == {
-        "codex": "needs-auth",
-        "codex-native": "needs-auth",
-        "claude-native": "version-too-low",
-        "qwen": True,
-    }
-
-
 def test_normalizer_drops_secret_and_malformed_fields() -> None:
-    normalized = harness_accounts.normalize_harness_accounts(
+    normalized = account_types.normalize_harness_accounts(
         {
             "codex": {
                 "kind": "chatgpt",
@@ -224,3 +198,137 @@ def test_normalizer_drops_secret_and_malformed_fields() -> None:
     )
 
     assert normalized == {"codex": {"kind": "chatgpt", "email": "person@example.test"}}
+
+
+def test_codex_probe_skips_notifications_buffered_before_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(
+        bin_dir / "codex",
+        """import json, os, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'initialize':
+        print(json.dumps({'id': message['id'], 'result': {}}), flush=True)
+    elif message.get('method') == 'account/read':
+        payload = (
+            json.dumps({'method': 'account/updated', 'params': {}}) + '\\n' +
+            json.dumps({'id': message['id'], 'result': {'account': {
+                'type': 'chatgpt', 'email': 'buffered@example.test'
+            }}}) + '\\n'
+        )
+        os.write(sys.stdout.fileno(), payload.encode())
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert harness_accounts.harness_account_map()["codex"] == {
+        "kind": "chatgpt",
+        "email": "buffered@example.test",
+    }
+
+
+def test_codex_refresh_token_is_only_requested_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "refresh-calls.jsonl"
+    _executable(
+        bin_dir / "codex",
+        """import json, os, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'initialize':
+        print(json.dumps({'id': message['id'], 'result': {}}), flush=True)
+    elif message.get('method') == 'account/read':
+        with open(os.environ['REFRESH_CALLS'], 'a') as stream:
+            stream.write(json.dumps(message['params']) + '\\n')
+        print(json.dumps({'id': message['id'], 'result': {'account': None}}), flush=True)
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("REFRESH_CALLS", str(calls))
+
+    harness_accounts.harness_account_map()
+    harness_accounts.harness_account_map(refresh_codex=True)
+
+    assert [json.loads(line) for line in calls.read_text().splitlines()] == [
+        {"refreshToken": False},
+        {"refreshToken": True},
+    ]
+
+
+def test_inconclusive_and_logged_out_probes_are_not_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(bin_dir / "codex", "raise SystemExit(1)\n")
+    _executable(
+        bin_dir / "claude",
+        """import json
+print(json.dumps({'loggedIn': False}))
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    accounts = harness_accounts.harness_account_map()
+    assert accounts["codex"] == {"kind": "unknown"}
+    assert accounts["claude"] == {"kind": "none"}
+
+
+def test_codex_explicit_revocation_is_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(
+        bin_dir / "codex",
+        """import json, sys
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('method') == 'initialize':
+        print(json.dumps({'id': message['id'], 'result': {}}), flush=True)
+    elif message.get('method') == 'account/read':
+        print(json.dumps({'id': message['id'], 'error': {'code': 'token_revoked'}}), flush=True)
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+    assert harness_accounts.harness_account_map()["codex"] == {
+        "kind": "unknown",
+        "expired": True,
+    }
+
+
+def test_opencode_probe_includes_env_and_config_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _executable(bin_dir / "opencode", "raise SystemExit(0)\n")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+    monkeypatch.setattr(
+        harness_accounts,
+        "opencode_auth_summary",
+        lambda: OpenCodeAuthSummary(
+            installed=True,
+            stored_providers=(),
+            env_providers=("OpenAI",),
+            configured_providers=("amazon-bedrock",),
+        ),
+    )
+
+    account = harness_accounts.harness_account_map()["opencode"]
+    assert account == {
+        "kind": "providers",
+        "providers": [
+            {"id": "openai", "label": "OpenAI", "auth_type": "env"},
+            {"id": "amazon-bedrock", "label": "amazon-bedrock", "auth_type": "config"},
+        ],
+    }
+    assert "must-not-leak" not in json.dumps(account)

@@ -30,6 +30,7 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import OmnigentError
 from omnigent.host.frames import (
+    CAP_HARNESS_ACCOUNTS,
     CAP_HARNESS_LOGIN,
     CAP_REFRESH_HARNESSES,
     HostHarnessLoginCancelFrame,
@@ -90,7 +91,13 @@ def _hello_text(name: str = _HOST_NAME) -> str:
             version="0.1.0-test",
             frame_protocol_version=1,
             name=name,
-            capabilities=[CAP_REFRESH_HARNESSES, CAP_HARNESS_LOGIN],
+            configured_harnesses={"codex": True, "claude": True},
+            harness_accounts={"codex": {"kind": "chatgpt"}},
+            capabilities=[
+                CAP_REFRESH_HARNESSES,
+                CAP_HARNESS_ACCOUNTS,
+                CAP_HARNESS_LOGIN,
+            ],
         )
     )
 
@@ -194,6 +201,9 @@ async def install_setup(
             frame = decode_host_frame(text)
             if isinstance(frame, HostHarnessLoginFrame):
                 reply = replies.get("__login__", {})
+                replies.setdefault("__started__", {})[frame.login_id] = True
+                if reply.get("drop"):
+                    continue
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -201,7 +211,7 @@ async def install_setup(
                             HostHarnessLoginResultFrame(
                                 request_id=frame.request_id,
                                 status=reply.get("status", "ok"),
-                                login_id=reply.get("login_id", "login-1"),
+                                login_id=reply.get("login_id", frame.login_id),
                                 verification_url=reply.get(
                                     "verification_url", "https://example.test/device"
                                 ),
@@ -214,6 +224,7 @@ async def install_setup(
                 )
                 continue
             if isinstance(frame, HostHarnessLoginCancelFrame):
+                replies.setdefault("__cancelled__", {})[frame.login_id] = True
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -226,6 +237,7 @@ async def install_setup(
                 )
                 continue
             if isinstance(frame, HostHarnessLogoutFrame):
+                reply = replies.get("__logout__")
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
@@ -233,10 +245,16 @@ async def install_setup(
                             HostHarnessLogoutResultFrame(
                                 request_id=frame.request_id,
                                 status="ok",
-                                configured_harnesses={frame.harness: "needs-auth"},
-                                harness_accounts={
-                                    frame.harness: {"kind": "unknown", "expired": True}
-                                },
+                                configured_harnesses=(
+                                    reply.get("configured_harnesses")
+                                    if reply is not None
+                                    else {frame.harness: True}
+                                ),
+                                harness_accounts=(
+                                    reply.get("harness_accounts")
+                                    if reply is not None
+                                    else {frame.harness: {"kind": "unknown", "expired": True}}
+                                ),
                             )
                         ),
                     }
@@ -254,7 +272,7 @@ async def install_setup(
                                 configured_harnesses=reply.get(
                                     "configured_harnesses", {"codex-native": True}
                                 ),
-                                harness_accounts=reply.get("harness_accounts", {}),
+                                harness_accounts=reply.get("harness_accounts"),
                                 gateway_inference=reply.get(
                                     "gateway_inference", {"codex-native": False}
                                 ),
@@ -747,22 +765,23 @@ async def test_codex_login_start_status_completion_and_logout(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         started = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
         assert started.status_code == 200, started.text
+        login_id = started.json()["login_id"]
         assert started.json() == {
-            "login_id": "login-1",
+            "login_id": login_id,
             "verification_url": "https://example.test/device",
             "user_code": "ABCD-EFGH",
             "expires_at": 2_000_000_000,
         }
 
-        pending = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
-        assert pending.json() == {"status": "pending", "error": None}
+        pending = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
+        assert pending.json() == {"status": "pending", "error": None, "expired": False}
 
         await comm.send_input(
             {
                 "type": "websocket.receive",
                 "text": encode_host_frame(
                     HostHarnessLoginCompletedFrame(
-                        login_id="login-1",
+                        login_id=login_id,
                         success=True,
                         configured_harnesses={"codex": True},
                         harness_accounts={
@@ -779,12 +798,13 @@ async def test_codex_login_start_status_completion_and_logout(
         )
         conn = registry.get(_HOST_ID)
         assert conn is not None
-        while conn.harness_logins["login-1"]["status"] == "pending":
+        while conn.harness_logins[login_id].status == "pending":
             await asyncio.sleep(0.01)
-        completed = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
+        completed = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
         assert completed.json() == {
             "status": "succeeded",
             "error": None,
+            "expired": False,
             "configured_harnesses": {"codex": True},
             "harness_accounts": {
                 "codex": {
@@ -798,7 +818,7 @@ async def test_codex_login_start_status_completion_and_logout(
 
         logged_out = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/logout")
         assert logged_out.json() == {
-            "configured_harnesses": {"codex": "needs-auth"},
+            "configured_harnesses": {"codex": True},
             "harness_accounts": {"codex": {"kind": "unknown", "expired": True}},
         }
 
@@ -816,10 +836,71 @@ async def test_codex_login_busy_and_cancel(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
         assert first.status_code == 200
+        login_id = first.json()["login_id"]
         busy = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
         assert busy.status_code == 409
-        cancelled = await client.delete(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
-        assert cancelled.json() == {"status": "cancelled", "error": None}
+        assert busy.json() == {"code": "login_busy", "login_id": login_id}
+        cancelled = await client.delete(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
+        assert cancelled.json() == {
+            "status": "cancelled",
+            "error": None,
+            "expired": False,
+        }
+
+
+async def test_codex_login_start_timeout_sends_cancel_and_clears_busy(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, registry, _comm, replies, _drain = install_setup
+    replies["__login__"] = {"drop": True}
+    monkeypatch.setattr(hosts_module, "_HARNESS_LOGIN_START_TIMEOUT_S", 0.01)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+
+    assert response.status_code == 504
+    started_ids = set(replies["__started__"])
+    assert started_ids
+    assert set(replies["__cancelled__"]) == started_ids
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    assert conn.active_harness_logins == {}
+
+
+async def test_logout_probe_failure_preserves_connected_host_snapshot(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, replies, _drain = install_setup
+    replies["__logout__"] = {
+        "configured_harnesses": None,
+        "harness_accounts": None,
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/logout")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "configured_harnesses": {"codex": True, "claude": True},
+        "harness_accounts": {"codex": {"kind": "chatgpt"}},
+    }
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    assert conn.hello.configured_harnesses == {"codex": True, "claude": True}
+    assert conn.hello.harness_accounts == {"codex": {"kind": "chatgpt"}}
 
 
 async def test_codex_login_completion_reports_expired_status(
@@ -835,13 +916,15 @@ async def test_codex_login_completion_reports_expired_status(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         started = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
         assert started.status_code == 200
+        login_id = started.json()["login_id"]
         await comm.send_input(
             {
                 "type": "websocket.receive",
                 "text": encode_host_frame(
                     HostHarnessLoginCompletedFrame(
-                        login_id="login-1",
+                        login_id=login_id,
                         success=False,
+                        expired=True,
                         error="login expired",
                     )
                 ),
@@ -849,12 +932,16 @@ async def test_codex_login_completion_reports_expired_status(
         )
         conn = registry.get(_HOST_ID)
         assert conn is not None
-        while conn.harness_logins["login-1"]["status"] == "pending":
+        while conn.harness_logins[login_id].status == "pending":
             await asyncio.sleep(0.01)
 
-        status = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
+        status = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
 
-    assert status.json() == {"status": "expired", "error": "login expired"}
+    assert status.json() == {
+        "status": "expired",
+        "error": "login expired",
+        "expired": True,
+    }
 
 
 async def test_codex_login_old_host_returns_login_unsupported(

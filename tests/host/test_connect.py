@@ -4969,24 +4969,26 @@ async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
     def _invalidate() -> None:
         calls.append("invalidate")
 
-    def _configured() -> dict[str, bool]:
+    async def _configured(*, startup: bool) -> dict[str, bool]:
         calls.append("configured")
         return {"codex-native": True}
 
-    def _gateway() -> dict[str, bool]:
+    async def _gateway(*, startup: bool) -> dict[str, bool]:
         calls.append("gateway")
         return {"codex-native": False}
 
-    def _accounts() -> dict[str, object]:
+    async def _accounts(*, explicit_refresh: bool) -> dict[str, object]:
+        assert explicit_refresh is True
         calls.append("accounts")
         return {}
 
     monkeypatch.setattr(connect, "invalidate_harness_login_probe_cache", _invalidate)
-    monkeypatch.setattr(connect, "configured_harness_map", _configured)
-    monkeypatch.setattr(connect, "gateway_inference_map", _gateway)
-    monkeypatch.setattr(connect, "harness_account_map", _accounts)
+    host = _make_host_process()
+    monkeypatch.setattr(host, "_probe_configured_harnesses", _configured)
+    monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
+    monkeypatch.setattr(host, "_probe_harness_accounts", _accounts)
 
-    result = _make_host_process()._handle_refresh_harnesses(
+    result = await host._handle_refresh_harnesses(
         HostRefreshHarnessesFrame(request_id="refresh-1")
     )
 
@@ -4994,7 +4996,8 @@ async def test_handle_refresh_harnesses_bypasses_cache_and_returns_fresh_maps(
     assert result.status == "ok"
     assert result.configured_harnesses == {"codex-native": True}
     assert result.gateway_inference == {"codex-native": False}
-    assert calls == ["invalidate", "accounts", "configured", "gateway"]
+    assert calls[0] == "invalidate"
+    assert set(calls[1:]) == {"accounts", "configured", "gateway"}
 
 
 async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
@@ -5009,24 +5012,42 @@ async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
         configured_harnesses={"codex-native": True},
         gateway_inference={"codex-native": False},
     )
-    guarded: list[Callable[[], HostRefreshHarnessesResultFrame]] = []
 
-    async def _guard(
-        operation: Callable[[], HostRefreshHarnessesResultFrame],
-    ) -> HostRefreshHarnessesResultFrame:
-        guarded.append(operation)
-        return operation()
+    async def _refresh(frame: HostRefreshHarnessesFrame) -> HostRefreshHarnessesResultFrame:
+        return result
 
-    monkeypatch.setattr(host, "_run_host_subprocess_in_thread", _guard)
-    monkeypatch.setattr(host, "_handle_refresh_harnesses", lambda frame: result)
+    monkeypatch.setattr(host, "_handle_refresh_harnesses", _refresh)
     tunnel = _FakeTunnel()
 
     await host._dispatch_host_frame(tunnel, request)  # type: ignore[arg-type]
 
-    assert len(guarded) == 1
     assert decode_host_frame(tunnel.sent[0]) == result
     assert host._configured_harnesses == {"codex-native": True}
     assert host._gateway_inference == {"codex-native": False}
+
+
+async def test_startup_capability_discovery_does_not_probe_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+
+    async def _configured(*, startup: bool) -> dict[str, bool]:
+        return {"codex": True}
+
+    async def _gateway(*, startup: bool) -> dict[str, bool]:
+        return {"codex": False}
+
+    async def _accounts(*, explicit_refresh: bool) -> dict[str, object]:
+        raise AssertionError("account probes must not run during startup discovery")
+
+    monkeypatch.setattr(host, "_probe_configured_harnesses", _configured)
+    monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
+    monkeypatch.setattr(host, "_probe_harness_accounts", _accounts)
+
+    await host._initialize_capabilities()
+
+    assert host._configured_harnesses == {"codex": True}
+    assert host._harness_accounts is None
 
 
 async def test_dispatch_codex_login_start_and_cancel(
@@ -5059,12 +5080,14 @@ async def test_dispatch_codex_login_start_and_cancel(
     tunnel = _FakeTunnel()
 
     await host._dispatch_host_frame(  # type: ignore[arg-type]
-        tunnel, HostHarnessLoginFrame(request_id="start-1", harness="codex")
+        tunnel,
+        HostHarnessLoginFrame(request_id="start-1", harness="codex", login_id="login-1"),
     )
     started = decode_host_frame(tunnel.sent.pop())
     assert isinstance(started, HostHarnessLoginResultFrame)
     assert started.status == "ok"
     assert started.login_id == "login-1"
+    assert host._owned_subprocess_ops == 0
 
     await host._dispatch_host_frame(  # type: ignore[arg-type]
         tunnel,
@@ -5074,6 +5097,63 @@ async def test_dispatch_codex_login_start_and_cancel(
     assert isinstance(cancelled, HostHarnessLoginCancelResultFrame)
     assert cancelled.status == "ok"
     assert _FakeLoginSession.cancelled == ["login-1"]
+    assert host._active_harness_logins == {}
+
+
+async def test_disconnect_mid_login_start_closes_session_and_clears_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tunnel drop cancels a login even before Codex returns device details."""
+    import omnigent.host.connect as connect
+
+    start_entered = asyncio.Event()
+    closed = asyncio.Event()
+
+    class _BlockedLoginSession:
+        pid = None
+
+        async def start(self) -> CodexDeviceLogin:
+            start_entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def cancel(self, login_id: str) -> None:
+            raise AssertionError("vendor login id does not exist while start is blocked")
+
+        async def close(self) -> None:
+            closed.set()
+
+    monkeypatch.setattr(connect, "CodexLoginSession", _BlockedLoginSession)
+    host = _make_host_process()
+    tunnel = _FakeTunnel()
+    start_task = asyncio.create_task(
+        host._dispatch_host_frame(  # type: ignore[arg-type]
+            tunnel,
+            HostHarnessLoginFrame(
+                request_id="start-blocked",
+                harness="codex",
+                login_id="server-login-id",
+            ),
+        )
+    )
+    await asyncio.wait_for(start_entered.wait(), timeout=1)
+
+    busy = await host._handle_harness_login(  # type: ignore[arg-type]
+        tunnel,
+        HostHarnessLoginFrame(
+            request_id="start-again",
+            harness="codex",
+            login_id="other-login-id",
+        ),
+    )
+    assert busy.status == "busy"
+    assert busy.login_id == "server-login-id"
+
+    await host._cancel_all_harness_logins()
+
+    assert start_task.cancelled()
+    assert closed.is_set()
+    assert host._owned_subprocess_ops == 0
     assert host._active_harness_logins == {}
 
 

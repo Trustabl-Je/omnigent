@@ -15,6 +15,8 @@ from httpx import ASGITransport, AsyncClient
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
+    CAP_HARNESS_ACCOUNTS,
+    CAP_HARNESS_LOGIN,
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
     WORKSPACE_MISSING_ERROR_CODE,
     HostHelloFrame,
@@ -47,6 +49,8 @@ def _make_hello(
     name: str = "test-laptop",
     configured_harnesses: dict[str, bool | str] | None = None,
     gateway_inference: dict[str, bool] | None = None,
+    harness_accounts: dict[str, dict[str, object]] | None = None,
+    capabilities: list[str] | None = None,
 ) -> str:
     """Encode a HostHelloFrame for tests.
 
@@ -66,6 +70,8 @@ def _make_hello(
             name=name,
             configured_harnesses=configured_harnesses,
             gateway_inference=gateway_inference,
+            harness_accounts=harness_accounts,
+            capabilities=capabilities or [],
         )
     )
 
@@ -129,6 +135,8 @@ async def _connect_host(
     name: str = "test-laptop",
     configured_harnesses: dict[str, bool | str] | None = None,
     gateway_inference: dict[str, bool] | None = None,
+    harness_accounts: dict[str, dict[str, object]] | None = None,
+    capabilities: list[str] | None = None,
 ) -> ApplicationCommunicator:
     """Connect a mock host via WebSocket tunnel.
 
@@ -151,7 +159,13 @@ async def _connect_host(
     await comm.send_input(
         {
             "type": "websocket.receive",
-            "text": _make_hello(name, configured_harnesses, gateway_inference),
+            "text": _make_hello(
+                name,
+                configured_harnesses,
+                gateway_inference,
+                harness_accounts,
+                capabilities,
+            ),
         },
     )
     while registry.get(host_id) is None:
@@ -324,6 +338,39 @@ async def test_hosts_api_configured_harnesses_null_for_older_host(
 
     assert resp.status_code == 200
     assert resp.json()["hosts"][0]["configured_harnesses"] is None
+
+
+async def test_harness_accounts_are_live_only_and_login_support_is_explicit(
+    host_api_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+    db_uri: str,
+) -> None:
+    """Account PII follows the local tunnel and is never read from the host row."""
+    app, registry, _hs, _cs = host_api_app
+    _comm = await _connect_host(
+        app,
+        registry,
+        configured_harnesses={"codex": True},
+        harness_accounts={"codex": {"kind": "chatgpt", "email": "person@example.test"}},
+        capabilities=[CAP_HARNESS_ACCOUNTS, CAP_HARNESS_LOGIN],
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        connected = (await client.get("/v1/hosts")).json()["hosts"][0]
+    assert connected["harness_accounts"] == {
+        "codex": {"kind": "chatgpt", "email": "person@example.test"}
+    }
+    assert connected["harness_login_supported"] is True
+
+    other_app, _other_registry, _other_store, _other_conversations = _build_host_api_app(db_uri)
+    async with AsyncClient(
+        transport=ASGITransport(app=other_app), base_url="http://test"
+    ) as client:
+        disconnected = (await client.get("/v1/hosts")).json()["hosts"][0]
+        detail = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()
+    assert "harness_accounts" not in disconnected
+    assert "harness_accounts" not in detail
+    assert disconnected["harness_login_supported"] is False
+    assert detail["harness_login_supported"] is False
 
 
 async def test_hosts_api_surfaces_gateway_inference(

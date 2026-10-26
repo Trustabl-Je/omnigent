@@ -383,7 +383,6 @@ def create_host_tunnel_router(
                 user_id=tunnel_owner,
                 allow_host_id_reown=allow_host_id_reown,
                 configured_harnesses=frame.configured_harnesses,
-                harness_accounts=frame.harness_accounts,
                 managed_token=managed_token,
             )
             host_persisted = True
@@ -814,12 +813,10 @@ async def _receive_loop(
                 host_store.update_harness_readiness,
                 host_id,
                 frame.configured_harnesses,
-                frame.harness_accounts,
             )
             conn.hello.configured_harnesses = dict(frame.configured_harnesses)
-            conn.hello.harness_accounts = (
-                dict(frame.harness_accounts) if frame.harness_accounts is not None else None
-            )
+            if frame.harness_accounts is not None:
+                conn.hello.harness_accounts = dict(frame.harness_accounts)
             conn.hello.gateway_inference = (
                 dict(frame.gateway_inference) if frame.gateway_inference is not None else None
             )
@@ -1015,33 +1012,24 @@ async def _receive_loop(
 
         if isinstance(frame, HostHarnessLoginCompletedFrame):
             state = conn.harness_logins.get(frame.login_id)
-            if state is not None and state.get("status") == "pending":
-                state["status"] = (
-                    "succeeded"
-                    if frame.success
-                    else "expired"
-                    if frame.error == "login expired"
-                    else "failed"
+            if state is not None and state.status == "pending":
+                state.status = (
+                    "succeeded" if frame.success else "expired" if frame.expired else "failed"
                 )
-                state["error"] = frame.error
-                state["configured_harnesses"] = frame.configured_harnesses
-                state["harness_accounts"] = frame.harness_accounts
-                harness = state.get("harness")
-                if isinstance(harness, str):
-                    conn.active_harness_logins.pop(harness, None)
+                state.expired = frame.expired
+                state.error = frame.error
+                state.configured_harnesses = frame.configured_harnesses
+                state.harness_accounts = frame.harness_accounts
+                conn.active_harness_logins.pop(state.harness, None)
                 if frame.configured_harnesses is not None:
                     await asyncio.to_thread(
                         host_store.update_harness_readiness,
                         host_id,
                         frame.configured_harnesses,
-                        frame.harness_accounts,
                     )
                     conn.hello.configured_harnesses = dict(frame.configured_harnesses)
-                    conn.hello.harness_accounts = (
-                        dict(frame.harness_accounts)
-                        if frame.harness_accounts is not None
-                        else None
-                    )
+                    if frame.harness_accounts is not None:
+                        conn.hello.harness_accounts = dict(frame.harness_accounts)
                     if on_host_update is not None:
                         try:
                             await on_host_update(host_id, conn.owner)

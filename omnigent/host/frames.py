@@ -29,13 +29,13 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
+from omnigent.harness_accounts import HarnessAccounts, normalize_harness_accounts
 from omnigent.harness_availability import HarnessAvailability, is_harness_availability
 from omnigent.host.harness_startup import HarnessStartup
 from omnigent.inner.native_attachments import (
     CAP_FILESYSTEM_ATTACHMENT_DELIVERY,
     CAP_FILESYSTEM_ATTACHMENTS,
 )
-from omnigent.onboarding.harness_accounts import HarnessAccounts, normalize_harness_accounts
 from omnigent.util.json_types import JsonObject as _JsonObject
 from omnigent.util.tunnel_limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
 
@@ -871,6 +871,7 @@ class HostHarnessLoginFrame:
 
     request_id: str
     harness: str
+    login_id: str
 
 
 @dataclass
@@ -909,6 +910,7 @@ class HostHarnessLoginCompletedFrame:
 
     login_id: str
     success: bool
+    expired: bool = False
     error: str | None = None
     configured_harnesses: dict[str, HarnessAvailability] | None = None
     harness_accounts: HarnessAccounts | None = None
@@ -1781,6 +1783,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.HARNESS_LOGIN.value,
                 "request_id": frame.request_id,
                 "harness": frame.harness,
+                "login_id": frame.login_id,
             }
         )
     if isinstance(frame, HostHarnessLoginResultFrame):
@@ -1819,6 +1822,7 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "kind": HostFrameKind.HARNESS_LOGIN_COMPLETED.value,
                 "login_id": frame.login_id,
                 "success": frame.success,
+                "expired": frame.expired,
                 "error": frame.error,
                 "configured_harnesses": frame.configured_harnesses,
                 "harness_accounts": frame.harness_accounts,
@@ -2392,6 +2396,7 @@ def _decode_known_host_frame(
             return HostHarnessLoginFrame(
                 request_id=_required_str(msg, "request_id"),
                 harness=_required_str(msg, "harness"),
+                login_id=_required_str(msg, "login_id"),
             )
         case HostFrameKind.HARNESS_LOGIN_RESULT:
             return HostHarnessLoginResultFrame(
@@ -2418,6 +2423,7 @@ def _decode_known_host_frame(
             return HostHarnessLoginCompletedFrame(
                 login_id=_required_str(msg, "login_id"),
                 success=_required_bool(msg, "success"),
+                expired=_required_bool(msg, "expired") if "expired" in msg else False,
                 error=_optional_nullable_str(msg, "error"),
                 configured_harnesses=_optional_str_availability_map(msg, "configured_harnesses"),
                 harness_accounts=normalize_harness_accounts(msg.get("harness_accounts")),

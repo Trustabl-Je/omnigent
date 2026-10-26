@@ -1095,7 +1095,7 @@ def test_legacy_hello_without_harness_accounts_decodes_to_none() -> None:
 
 def test_harness_login_frames_round_trip() -> None:
     frames = [
-        HostHarnessLoginFrame(request_id="start-1", harness="codex"),
+        HostHarnessLoginFrame(request_id="start-1", harness="codex", login_id="login-1"),
         HostHarnessLoginResultFrame(
             request_id="start-1",
             status="ok",
@@ -1109,6 +1109,7 @@ def test_harness_login_frames_round_trip() -> None:
         HostHarnessLoginCompletedFrame(
             login_id="login-1",
             success=True,
+            expired=False,
             configured_harnesses={"codex": True},
             harness_accounts={"codex": {"kind": "chatgpt", "expired": False}},
         ),
