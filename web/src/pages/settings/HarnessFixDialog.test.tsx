@@ -490,42 +490,15 @@ describe("HarnessFixDialog", () => {
     ["claude-native", "Claude Code"],
     ["codex-native", "Codex"],
     ["pi-native", "Pi"],
-  ])("offers and preselects Isaac for %s on Databricks", (harness, harnessLabel) => {
-    renderDialog({ harness, harnessLabel });
+  ])(
+    "offers and preselects Isaac for %s when databricks_features is false",
+    (harness, harnessLabel) => {
+      databricksFeatures = false;
+      renderDialog({ harness, harnessLabel });
 
-    expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
-  });
-
-  it.each([
-    ["claude-native", "Claude Code"],
-    ["codex-native", "Codex"],
-  ])("preselects Personal subscription for %s off Databricks", async (harness, harnessLabel) => {
-    databricksFeatures = false;
-    renderDialog({ harness, harnessLabel });
-
-    expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
-    expect(await screen.findByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
-      "aria-checked",
-      "true",
-    );
-  });
-
-  it("opens the API key and gateway form for Pi off Databricks", async () => {
-    databricksFeatures = false;
-    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
-      const url = String(input);
-      if (url === "/v1/harnesses") return json(catalog);
-      if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
-      throw new Error(`Unexpected URL: ${url}`);
-    });
-
-    renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
-
-    expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("radio", { name: /Personal subscription/ })).not.toBeInTheDocument();
-    expect(await screen.findByText("Use an API key")).toBeVisible();
-    expect(screen.getByText("Connect a gateway")).toBeVisible();
-  });
+      expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
+    },
+  );
 
   it("does not offer credential forms before installing a harness", () => {
     renderDialog({ mode: "install", harness: "pi-native", harnessLabel: "Pi" });

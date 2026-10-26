@@ -28,7 +28,6 @@ import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
 import {
-  GATEWAY_CREDENTIAL_COPY,
   HARNESS_CREDENTIAL_COPY,
   harnessCredentialFamily,
   harnessInstallableOnHost,
@@ -122,7 +121,6 @@ export const SettingsHarnessesSection = () => {
   // it off the setup dialog has no runnable install step, so we show status
   // only (no button that opens a dead-end dialog).
   const canSetup = isFeatureEnabled(info, "harness_install");
-  const databricksFeatures = info !== "loading" && info.databricks_features;
 
   // Online hosts first, then offline (disabled in the menu). Default the
   // selection to the first online host; the picker can override.
@@ -169,7 +167,6 @@ export const SettingsHarnessesSection = () => {
           entry={detail}
           host={selectedHost}
           canSetup={canSetup}
-          databricksFeatures={databricksFeatures}
           installable={harnessInstallableOnHost(info, detail.harness, selectedHost)}
           credentialKind={
             selectedHost
@@ -235,7 +232,6 @@ export const SettingsHarnessesSection = () => {
                 entry={entry}
                 host={selectedHost}
                 canSetup={canSetup}
-                databricksFeatures={databricksFeatures}
                 installable={harnessInstallableOnHost(info, entry.harness, selectedHost)}
                 credentialKind={
                   selectedHost
@@ -381,14 +377,13 @@ function harnessStatus(harness: string, host: Host | null) {
 function credentialPresentation(
   host: Host | null,
   harness: string,
-  databricksFeatures: boolean,
   override?: HarnessCredentialKind,
 ) {
   if (override === "personal") {
     return HARNESS_CREDENTIAL_COPY.personal;
   }
   if (override === "isaac" || host?.gateway_inference?.[harness] === true) {
-    return databricksFeatures ? HARNESS_CREDENTIAL_COPY.isaac : GATEWAY_CREDENTIAL_COPY;
+    return HARNESS_CREDENTIAL_COPY.isaac;
   }
   return { label: "Signed in", description: "Uses the harness's own login on this host" };
 }
@@ -492,7 +487,6 @@ function HarnessCard({
   entry,
   host,
   canSetup,
-  databricksFeatures,
   installable,
   credentialKind,
   onFix,
@@ -500,7 +494,6 @@ function HarnessCard({
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
-  databricksFeatures: boolean;
   installable: boolean;
   credentialKind?: HarnessCredentialKind;
   onFix: (mode: HarnessFixMode) => void;
@@ -522,8 +515,7 @@ function HarnessCard({
               enhanced={canSetup}
               configuredCredential={
                 status.ready && canSetup
-                  ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
-                      .label
+                  ? credentialPresentation(host, entry.harness, credentialKind).label
                   : undefined
               }
             />
@@ -580,7 +572,6 @@ function HarnessDetail({
   entry,
   host,
   canSetup,
-  databricksFeatures,
   installable,
   credentialKind,
   readyNotice,
@@ -589,7 +580,6 @@ function HarnessDetail({
   entry: HarnessEntry;
   host: Host | null;
   canSetup: boolean;
-  databricksFeatures: boolean;
   installable: boolean;
   credentialKind?: HarnessCredentialKind;
   readyNotice: { harness: string; hostId: string; version?: string } | null;
@@ -601,7 +591,7 @@ function HarnessDetail({
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
   const credential = canSetup
-    ? credentialPresentation(host, entry.harness, databricksFeatures, credentialKind)
+    ? credentialPresentation(host, entry.harness, credentialKind)
     : gateway
       ? {
           label: "Unity Gateway",

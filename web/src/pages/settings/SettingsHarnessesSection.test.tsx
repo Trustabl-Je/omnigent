@@ -444,16 +444,15 @@ describe("Harness details", () => {
     expect(screen.getByText(/harness.claude-native in ~\/.omnigent\/config.yaml/)).toBeTruthy();
   });
 
-  it("uses a neutral Gateway label off Databricks", () => {
+  it("keeps the Isaac label when databricks_features is false", () => {
     databricksFeatures = false;
     hosts = [{ ...ONLINE, gateway_inference: { "claude-native": true } }];
     renderHarnesses();
 
-    expect(within(card("claude-native")).getByText("· Gateway")).toBeTruthy();
+    expect(within(card("claude-native")).getByText("· Isaac")).toBeTruthy();
     fireEvent.click(screen.getByTestId("harness-settings-claude-native"));
-    expect(screen.getByText("Gateway")).toBeTruthy();
-    expect(screen.getByText("Credential provided by the configured AI gateway")).toBeTruthy();
-    expect(screen.queryByText("Isaac")).toBeNull();
+    expect(screen.getByText("Isaac")).toBeTruthy();
+    expect(screen.getByText("Databricks-managed credential via the Unity Gateway")).toBeTruthy();
   });
 
   it("keeps tool discovery lazy and shows host-reported details", () => {

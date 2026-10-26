@@ -72,8 +72,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (canonicalHarness === "pi" || canonicalHarness === "pi-native") return null;
     return setupSteps[canonicalHarness]?.find((step) => step.kind === "auth")?.command ?? null;
   }, [canonicalHarness, harness, setupSteps]);
-  const isaacSupported =
-    info !== "loading" && info.databricks_features && credentialFamily !== null;
+  const isaacSupported = credentialFamily !== null;
   const personalSupported =
     loginCommand !== null &&
     (isCodexHarness(harness) ||
