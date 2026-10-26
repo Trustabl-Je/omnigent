@@ -87,6 +87,36 @@ Provider-specific JSON fields belong in `pr_from_object`; common `html_url` and
 `url` fields are handled centrally. A failing provider is isolated so it cannot
 change a tool's result or prevent another provider from recording requests.
 
+## Server storage
+
+The runner or host remains the only forge client. The server stores each
+session's linked requests in one compressed JSON document on its metadata row
+(`omnigent_conversation_metadata.pull_requests`), from the `prs` and selected
+`pr` of every pull request response it proxies. After a turn ends in a
+session with a git branch or linked requests, it reads the PR resource itself,
+unless a client's read already covered that turn. Its own list then replaces
+`prs` in the response. Each entry keeps the request's title, state, and draft
+flag, with when the server requested that fetch; an older fetch never
+overwrites a newer one. The description, checks, comments, changed files, and
+diff stay on the host. A session keeps at most 50 linked requests and 50
+pending unlinks, and the stored document stays under 16,000 bytes.
+
+`GET /v1/sessions/{id}/pull-requests` answers without the runner or host, so
+the panel, sidebar, canvas, composer, and extension API keep showing requests
+while both are offline. It pages with `limit` and `after` (the previous page's
+`last_id`, a request URL). Each session list item carries its first request as
+`pull_request`. Servers that store requests report `session_pull_requests` in
+`/v1/info`; against older servers the web reads only the live host.
+
+Linking needs the host to verify the request; a session already at the limit
+drops its last request in display order. Unlinking
+(`DELETE /v1/sessions/{id}/pull-requests?url=`) removes the request, records
+the URL as a pending unlink in the same document, and forwards the unlink to
+the runner or host when one is reachable. Until the host stops reporting the URL, later
+requests carry up to 20 pending unlinks as the `removed_prs` JSON list, which the
+runner and host add to the session registry's exclusions; reports of an
+unlinked URL are ignored meanwhile.
+
 ## Verification
 
 Run the existing GitHub resource and tracking suites together with provider
