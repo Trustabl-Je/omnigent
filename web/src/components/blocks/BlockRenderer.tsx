@@ -14,7 +14,8 @@
 //
 // 2. Turn folding: once settled, each work run collapses behind a
 //    "Worked" row. Pending elicitations, routing cards and assistant
-//    messages stay visible (all but the last with opt-in `foldNarration`).
+//    messages stay visible; opt-in `foldNarration` folds narration too
+//    (Codex commentary, else all but the last message).
 
 import type { ReactNode } from "react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -451,9 +452,8 @@ function isTrailingWrapup(item: RenderItem): boolean {
 }
 
 /**
- * Split work from assistant text while preserving order. Text lacks a
- * reliable final-answer marker, so every completed message stays visible
- * unless `foldNarration` asks to keep only the last one.
+ * Split work from assistant text while preserving order. Every completed
+ * message stays visible unless `foldNarration` asks to fold narration.
  */
 function partitionTurn(items: RenderItem[], foldNarration = false): TurnPartition {
   let end = items.length;
@@ -462,10 +462,7 @@ function partitionTurn(items: RenderItem[], foldNarration = false): TurnPartitio
     wrapup.unshift(items[end - 1]!);
     end -= 1;
   }
-  // Keep the last non-blank message visible, even in a continued bubble.
-  const answerIndex = foldNarration
-    ? items.findLastIndex((item) => item.kind === "text" && item.text.trim() !== "")
-    : -1;
+  const foldsText = foldNarration ? narrationFolds(items) : () => false;
   const segments: TurnSegment[] = [];
   for (let i = 0; i < end; i += 1) {
     const item = items[i]!;
@@ -478,8 +475,7 @@ function partitionTurn(items: RenderItem[], foldNarration = false): TurnPartitio
       segments.push({ kind: "exempt", item, index: i });
       continue;
     }
-    // Blank text after the answer stays with it rather than opening a second fold.
-    const kind = item.kind === "text" && (answerIndex < 0 || i >= answerIndex) ? "text" : "work";
+    const kind = item.kind === "text" && !foldsText(item, i) ? "text" : "work";
     const previous = segments[segments.length - 1];
     if (previous?.kind === kind) previous.items.push(item);
     else segments.push({ kind, items: [item], startIndex: i });
@@ -490,6 +486,24 @@ function partitionTurn(items: RenderItem[], foldNarration = false): TurnPartitio
     else segments.push({ kind: "work", items: wrapup, startIndex: end });
   }
   return { segments };
+}
+
+/**
+ * Which messages `foldNarration` folds. A turn with a harness answer phase
+ * (Codex) folds only its commentary; otherwise all but the last message folds.
+ */
+function narrationFolds(items: RenderItem[]): (item: RenderItem, index: number) => boolean {
+  const hasAnswerPhase = items.some(
+    (item) =>
+      item.kind === "text" && (item.phase === "final_answer" || item.phase === "partial_answer"),
+  );
+  if (hasAnswerPhase) return (item) => item.kind === "text" && item.phase === "commentary";
+  // Keep the last non-blank message visible, even in a continued bubble; blank
+  // text after it stays with it rather than opening a second fold.
+  const answerIndex = items.findLastIndex(
+    (item) => item.kind === "text" && item.text.trim() !== "",
+  );
+  return (_item, index) => index < answerIndex;
 }
 
 function isPendingElicitation(item: RenderItem): boolean {
