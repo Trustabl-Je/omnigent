@@ -11,10 +11,11 @@ import { HarnessFixDialog, type HarnessFixDialogProps } from "./HarnessFixDialog
 vi.mock("@/lib/identity", () => ({ authenticatedFetch: vi.fn() }));
 vi.mock("@/components/ui/toast", () => ({ showToast: vi.fn() }));
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn().mockResolvedValue(undefined) }));
-let databricksFeatures = true;
+let isaacCredential: "auto" | "on" | "off" | undefined;
 vi.mock("@/lib/CapabilitiesContext", () => ({
   useServerInfo: () => ({
-    databricks_features: databricksFeatures,
+    databricks_features: false,
+    isaac_credential: isaacCredential,
     features: { harness_install: true },
     installable_harnesses: [
       "claude-native",
@@ -96,10 +97,16 @@ function renderDialog(overrides: Partial<HarnessFixDialogProps> = {}) {
 }
 
 beforeEach(() => {
-  databricksFeatures = true;
+  isaacCredential = undefined;
   vi.clearAllMocks();
   vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
-    if (String(input) === "/v1/harnesses") return json(catalog);
+    const url = String(input);
+    if (url === "/v1/harnesses") return json(catalog);
+    if (url.endsWith("/credentials/detected")) {
+      return json({
+        credentials: [{ family: "databricks", source: "isaac CLI", env_var: null }],
+      });
+    }
     throw new Error(`Unexpected URL: ${String(input)}`);
   });
 });
@@ -165,7 +172,7 @@ describe("HarnessFixDialog", () => {
     expect(
       vi
         .mocked(authenticatedFetch)
-        .mock.calls.every(([input]) => !String(input).includes("/credential")),
+        .mock.calls.every(([input]) => !String(input).endsWith("/credential")),
     ).toBe(true);
   });
 
@@ -805,15 +812,96 @@ describe("HarnessFixDialog", () => {
     ["claude-native", "Claude Code"],
     ["codex-native", "Codex"],
     ["pi-native", "Pi"],
-  ])(
-    "offers and preselects Isaac for %s when databricks_features is false",
-    (harness, harnessLabel) => {
-      databricksFeatures = false;
-      renderDialog({ harness, harnessLabel });
+  ])("offers and preselects Isaac for %s when explicitly on", (harness, harnessLabel) => {
+    isaacCredential = "on";
+    renderDialog({ harness, harnessLabel });
 
-      expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /Isaac/ })).toHaveAttribute("aria-checked", "true");
+    expect(
+      vi
+        .mocked(authenticatedFetch)
+        .mock.calls.every(([input]) => !String(input).endsWith("/credentials/detected")),
+    ).toBe(true);
+  });
+
+  it.each(["auto", undefined] as const)(
+    "offers and preselects Isaac when mode is %s and Databricks is detected",
+    async (mode) => {
+      isaacCredential = mode;
+      renderDialog();
+
+      expect(await screen.findByRole("radio", { name: /Isaac/ })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
     },
   );
+
+  it.each(["auto", undefined] as const)(
+    "preselects Personal subscription when mode is %s and Databricks is not detected",
+    async (mode) => {
+      isaacCredential = mode;
+      vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "/v1/harnesses") return json(catalog);
+        if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+      renderDialog();
+
+      await waitFor(() =>
+        expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument(),
+      );
+      expect(screen.getByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    },
+  );
+
+  it("falls back to Isaac when automatic detection is unavailable", async () => {
+    isaacCredential = "auto";
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) {
+        return json({ detail: "unsupported" }, { status: 404 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    renderDialog();
+
+    expect(await screen.findByRole("radio", { name: /Isaac/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it.each([
+    ["claude-native", "Claude Code"],
+    ["codex-native", "Codex"],
+  ])(
+    "hides Isaac and preselects Personal subscription for %s when off",
+    async (harness, harnessLabel) => {
+      isaacCredential = "off";
+      renderDialog({ harness, harnessLabel });
+
+      expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
+      expect(await screen.findByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    },
+  );
+
+  it("falls back to credential forms for Pi when Isaac is off", async () => {
+    isaacCredential = "off";
+    renderDialog({ harness: "pi-native", harnessLabel: "Pi" });
+
+    expect(screen.queryByRole("radio", { name: /Isaac/ })).not.toBeInTheDocument();
+    expect(await screen.findByText("Use an API key")).toBeVisible();
+    expect(screen.getByText("Connect a gateway")).toBeVisible();
+  });
 
   it("does not offer credential forms before installing a harness", () => {
     renderDialog({ mode: "install", harness: "pi-native", harnessLabel: "Pi" });

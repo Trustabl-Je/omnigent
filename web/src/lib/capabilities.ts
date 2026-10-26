@@ -102,6 +102,8 @@ export interface ServerInfo {
    * SPA shows the clean, provider-agnostic hints.
    */
   databricks_features: boolean;
+  /** Controls Isaac credential discovery in harness setup. Missing means auto. */
+  isaac_credential?: "auto" | "on" | "off";
   /**
    * True when the server can provision cloud-sandbox hosts for
    * ``host_type: "managed"`` session creates (a ``sandbox:`` config with a
@@ -392,6 +394,12 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
           login_url: typeof data.login_url === "string" ? data.login_url : null,
           needs_setup: data.needs_setup === true,
           databricks_features: data.databricks_features === true,
+          isaac_credential:
+            data.isaac_credential === "auto" ||
+            data.isaac_credential === "on" ||
+            data.isaac_credential === "off"
+              ? data.isaac_credential
+              : undefined,
           managed_sandboxes_enabled: data.managed_sandboxes_enabled === true,
           durable_initial_input: data.durable_initial_input === true,
           sandbox_provider:
