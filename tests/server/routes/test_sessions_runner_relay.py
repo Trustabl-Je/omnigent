@@ -1193,6 +1193,7 @@ async def test_relay_preserves_failure_reported_during_intentional_teardown(
             "failure_source": "native_terminal_start",
             "exception_type": "RuntimeError",
             "exception_cause_type": "ReadTimeout",
+            "native_launch_code_origin": "omnigent.runner.native.orchestration.launch:42",
             "origin": "forged",
         },
     }
@@ -1234,6 +1235,7 @@ async def test_relay_preserves_failure_reported_during_intentional_teardown(
         if not bare:
             assert attrs["failure_id"] == "err_synthetic_relay"
             assert attrs["exception_cause_type"] == "ReadTimeout"
+            assert attrs["native_launch_code_origin"].endswith(".launch:42")
         assert attrs["origin"] == "relayed_runner_status"
         assert attrs["failure_wire_code"] == ("missing" if bare else "present")
         assert attrs["failure_wire_message"] == ("missing" if bare else "present")
