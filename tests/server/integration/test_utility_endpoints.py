@@ -17,7 +17,6 @@ import pytest
 from fastapi import FastAPI
 
 from omnigent.server.app import ServerInfoResponse
-from omnigent.server.feature_flags import Feature, FeatureFlags
 from omnigent.stores.agent_store import AgentStore
 
 pytestmark = pytest.mark.asyncio
@@ -102,6 +101,7 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     }
     # Compatibility field for frontend builds predating the nested map.
     assert data["harness_install_enabled"] is False
+    assert data["isaac_credential"] == "auto"
     # installable_harnesses is the allowlist the SPA offers setup for; blank
     # while the feature is off so the UI never offers an install the disabled
     # route would reject.
@@ -172,8 +172,7 @@ async def test_info_advertises_installable_harnesses_when_enabled(
     """
     from omnigent.onboarding.harness_install import ui_installable_harnesses
 
-    enabled = FeatureFlags(frozenset({Feature.HARNESS_INSTALL}))
-    monkeypatch.setattr(app.state, "feature_flags", enabled)
+    monkeypatch.setattr(app.state, "harness_install", True)
     resp = await client.get("/v1/info")
     assert resp.status_code == 200
     data = resp.json()

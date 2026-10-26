@@ -49,7 +49,7 @@ from omnigent.host.frames import (
     encode_host_frame,
 )
 from omnigent.server.feature_flags import FeatureFlags
-from omnigent.server.host_registry import HostRegistry
+from omnigent.server.host_registry import HarnessLoginState, HostRegistry
 from omnigent.server.routes import hosts as hosts_module
 from omnigent.server.routes.host_tunnel import create_host_tunnel_router
 from omnigent.server.routes.hosts import create_hosts_router
@@ -646,6 +646,46 @@ async def test_refresh_harnesses_route_hidden_when_flag_off(
         resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/refresh")
 
     assert resp.status_code == 404
+
+
+async def test_harness_install_callable_flips_route_without_restart(
+    db_uri: str,
+) -> None:
+    """A deployment gate can reveal every setup route between requests."""
+    enabled = False
+    registry = HostRegistry()
+    host_store = HostStore(db_uri)
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    app = FastAPI()
+    app.include_router(create_host_tunnel_router(registry, host_store), prefix="/v1")
+    app.include_router(
+        create_hosts_router(
+            registry,
+            host_store,
+            conv_store,
+            harness_install=lambda: enabled,
+        ),
+        prefix="/v1",
+    )
+    comm = await _connect_mock_host(app, registry)
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    conn.harness_logins["login-1"] = HarnessLoginState(
+        harness="codex",
+        status="pending",
+        expires_at=2**62,
+    )
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            hidden = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
+            enabled = True
+            visible = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
+        assert hidden.status_code == 404
+        assert visible.status_code == 200
+        assert visible.json() == {"status": "pending", "error": None, "expired": False}
+    finally:
+        await comm.send_input({"type": "websocket.disconnect", "code": 1000})
 
 
 async def test_refresh_harnesses_old_host_returns_unsupported_without_waiting(

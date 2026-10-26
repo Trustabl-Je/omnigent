@@ -9,7 +9,7 @@ is built, giving each one an immutable snapshot.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -148,6 +148,14 @@ class FeatureFlags:
     def enabled_names(self) -> tuple[str, ...]:
         """Return enabled canonical names in stable order."""
         return tuple(sorted(feature.value for feature in self.enabled_features))
+
+
+HarnessInstallGate = bool | Callable[[], bool]
+
+
+def harness_install_enabled(gate: HarnessInstallGate) -> bool:
+    """Resolve the harness-install gate for the current request."""
+    return bool(gate() if callable(gate) else gate)
 
 
 def resolve_feature_flags(environ: Mapping[str, str] | None = None) -> FeatureFlags:

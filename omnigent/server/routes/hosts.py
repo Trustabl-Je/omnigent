@@ -67,7 +67,13 @@ from omnigent.onboarding.harness_install import (
 from omnigent.runner.identity import token_bound_runner_id
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.auth import AuthProvider
-from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
+from omnigent.server.feature_flags import (
+    Feature,
+    FeatureFlags,
+    HarnessInstallGate,
+    harness_install_enabled,
+    resolve_feature_flags,
+)
 from omnigent.server.host_registry import HarnessLoginState, HostConnection, HostRegistry
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
@@ -791,6 +797,7 @@ def create_hosts_router(
     agent_store: AgentStore | None = None,
     agent_cache: AgentCache | None = None,
     feature_flags: FeatureFlags | None = None,
+    harness_install: HarnessInstallGate | None = None,
 ) -> APIRouter:
     """Build the router for host REST endpoints.
 
@@ -813,10 +820,19 @@ def create_hosts_router(
         ``os_env.cwd`` boundary. Paired with ``agent_store``.
     :param feature_flags: Immutable deployment release-feature snapshot.
         When omitted, resolves ``OMNIGENT_FEATURES`` at router construction.
+    :param harness_install: Optional static or per-request harness-install gate.
+        When omitted, the feature snapshot decides.
     :returns: A FastAPI router with host endpoints.
     """
     flags = feature_flags or resolve_feature_flags()
+    harness_install_gate: HarnessInstallGate = (
+        flags.enabled(Feature.HARNESS_INSTALL) if harness_install is None else harness_install
+    )
     router = APIRouter()
+
+    def require_harness_install() -> None:
+        if not harness_install_enabled(harness_install_gate):
+            raise HTTPException(status_code=404, detail="not found")
 
     @router.get("/hosts")
     async def list_hosts(request: Request) -> dict[str, list[dict[str, Any]]]:
@@ -1631,8 +1647,7 @@ def create_hosts_router(
         host_id: str,
     ) -> dict[str, Any]:
         """Force an immediate full harness-readiness probe on a host."""
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
 
         host, conn = await _connected_owned_host(
             request=request,
@@ -1688,8 +1703,7 @@ def create_hosts_router(
         request: Request, host_id: str, harness: str
     ) -> dict[str, Any]:
         """Start a Codex device-code login on a connected host."""
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
         harness_key = harness_account_key(harness)
         if harness_key != "codex":
             raise HTTPException(status_code=400, detail="device login is supported only for codex")
@@ -1780,8 +1794,7 @@ def create_hosts_router(
         request: Request, host_id: str, harness: str, login_id: str
     ) -> dict[str, Any]:
         """Return the current device-login status without exposing its code."""
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
         harness = harness_account_key(harness) or harness
         _host, conn = await _connected_owned_host(
             request=request,
@@ -1818,8 +1831,7 @@ def create_hosts_router(
         request: Request, host_id: str, harness: str, login_id: str
     ) -> dict[str, Any]:
         """Cancel an active device login."""
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
         harness = harness_account_key(harness) or harness
         _host, conn = await _connected_owned_host(
             request=request,
@@ -1849,8 +1861,7 @@ def create_hosts_router(
     @router.post("/hosts/{host_id}/harnesses/{harness}/logout")
     async def logout_host_harness(request: Request, host_id: str, harness: str) -> dict[str, Any]:
         """Log Codex or Claude out and return freshly probed account state."""
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
         if harness not in {"codex", "claude"}:
             raise HTTPException(
                 status_code=400, detail="logout is supported only for codex and claude"
@@ -1922,8 +1933,7 @@ def create_hosts_router(
         """
         # A disabled route is indistinguishable from a non-existent one, so
         # the feature is fully dark until the deployment opts in.
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
 
         # Allowlist (400) is checked before the ownership check (403) so error
         # codes can't be used to enumerate host ownership. Never trust the
@@ -2052,8 +2062,7 @@ def create_hosts_router(
             the owner, 409 when offline or the host daemon is too old to store
             credentials, 502 on host-side failure, 504 on timeout.
         """
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
 
         # Allowlist before ownership (403) so error codes can't enumerate
         # ownership. Gate on the credential-CONFIGURABLE set (Claude/Codex/Pi),
@@ -2161,8 +2170,7 @@ def create_hosts_router(
             the owner, 409 when offline or the host daemon is too old to detect
             credentials, 502/504 on host failure/timeout.
         """
-        if not flags.enabled(Feature.HARNESS_INSTALL):
-            raise HTTPException(status_code=404, detail="not found")
+        require_harness_install()
 
         user_id = require_user(request, auth_provider)
 
