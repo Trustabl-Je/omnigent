@@ -94,21 +94,29 @@ def _isolate_config_home(config: pytest.Config) -> None:
     cannot overwrite each other's mock provider config. A caller-chosen home,
     an external server and a prepared reproduction keep their own config.
     """
-    inherited = os.environ.get(_CONFIG_HOME_ENV)
+    # The product treats an empty value as unset, so this does too.
+    inherited = os.environ.get(_CONFIG_HOME_ENV) or None
     suite_owned = inherited is not None and inherited == os.environ.get(_SUITE_CONFIG_HOME_ENV)
     if (inherited is not None and not suite_owned) or (
         config.getoption("--ui-base-url", default=None)
         or os.environ.get("OMNIGENT_REPRO_SERVER_URL")
+        # An xdist controller spawns nothing; each worker makes its own copy.
+        or (
+            config.getoption("numprocesses", default=0)
+            and not os.environ.get("PYTEST_XDIST_WORKER")
+        )
     ):
         return
     from omnigent.config import global_config_path
 
-    source = global_config_path()
+    source = global_config_path().parent
     home = Path(tempfile.mkdtemp(prefix="omnigent-ui-config-"))
-    if source.is_file():
-        fd = os.open(home / "config.yaml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(source.read_bytes())
+    # File-backed provider secrets live beside the config they resolve for.
+    for name in ("config.yaml", "secrets.json"):
+        if (source / name).is_file():
+            fd = os.open(home / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write((source / name).read_bytes())
     os.environ[_CONFIG_HOME_ENV] = os.environ[_SUITE_CONFIG_HOME_ENV] = str(home)
     config.stash[_CONFIG_HOME_KEY] = (home, inherited)
 

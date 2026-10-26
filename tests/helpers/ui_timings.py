@@ -21,11 +21,14 @@ def pytest_configure(config: pytest.Config) -> None:
     if worker:
         # Each xdist worker records the tests it ran in its own file.
         path = path.with_name(f"{path.stem}-{worker}{path.suffix}")
-    elif config.getoption("numprocesses", default=0):
-        # The controller only relays worker reports; clear stale files instead.
-        for stale in [path, *path.parent.glob(f"{path.stem}-gw*{path.suffix}")]:
+    else:
+        # Worker files from an earlier run would mix into this run's artifacts.
+        for stale in path.parent.glob(f"{path.stem}-gw*{path.suffix}"):
             stale.unlink(missing_ok=True)
-        return
+        if config.getoption("numprocesses", default=0):
+            # The controller only relays worker reports.
+            path.unlink(missing_ok=True)
+            return
     config.pluginmanager.register(TimingRecorder(path, worker), "ui-timing-recorder")
 
 

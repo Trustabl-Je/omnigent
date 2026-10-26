@@ -1,7 +1,7 @@
 # UI timing artifacts
 
-Every UI CI shard uploads `e2e-ui-timings-<run>-<attempt>-shard<N>` with a
-`ui-timings.jsonl` file, retained for 14 days. This only records measurements;
+Every UI CI shard uploads `e2e-ui-timings-<run>-<attempt>-shard<N>` with one or
+more `ui-timings*.jsonl` files, retained for 14 days. This only records measurements;
 the existing round-robin sharding, test selection, order, and retries stay the
 same. Timings are not used to schedule or exclude tests.
 

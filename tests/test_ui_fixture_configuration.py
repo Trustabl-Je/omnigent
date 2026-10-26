@@ -1,8 +1,9 @@
 """Regression checks for the UI suite's fixture configuration."""
 
 import json
+import os
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -138,7 +139,8 @@ def test_mock_config_restores_symlink_target(monkeypatch, tmp_path, raise_in_tes
 
 @dataclass
 class _ConfigStub:
-    options: dict[str, Any]
+    options: dict[str, Any] = field(default_factory=dict)
+    stash: pytest.Stash = field(default_factory=pytest.Stash)
 
     def getoption(self, name: str, default: Any = None) -> Any:
         return self.options.get(name, default)
@@ -166,3 +168,39 @@ def test_pytest_configure_rejects_dev_ui_base_url(
                 _ConfigStub({"--ui-base-url": "http://127.0.0.1:5173", "--headed": False}),
             )
         )
+
+
+def test_worker_replaces_and_restores_an_inherited_suite_config_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inherited = tmp_path / "controller"
+    inherited.mkdir()
+    (inherited / "config.yaml").write_text("controller copy\n")
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(inherited))
+    monkeypatch.setenv("OMNIGENT_UI_TESTS_CONFIG_HOME", str(inherited))
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
+    monkeypatch.delenv("OMNIGENT_REPRO_SERVER_URL", raising=False)
+    config = cast(Config, _ConfigStub({"numprocesses": 2}))
+    configuration._isolate_config_home(config)
+    worker_home = Path(os.environ["OMNIGENT_CONFIG_HOME"])
+    assert worker_home != inherited
+    assert os.environ["OMNIGENT_UI_TESTS_CONFIG_HOME"] == str(worker_home)
+    assert (worker_home / "config.yaml").read_text() == "controller copy\n"
+    assert oct((worker_home / "config.yaml").stat().st_mode & 0o777) == "0o600"
+    configuration.pytest_unconfigure(config)
+    assert os.environ["OMNIGENT_CONFIG_HOME"] == str(inherited)
+    assert os.environ["OMNIGENT_UI_TESTS_CONFIG_HOME"] == str(inherited)
+    assert not worker_home.exists()
+    assert (inherited / "config.yaml").read_text() == "controller copy\n"
+
+
+def test_xdist_controller_leaves_config_home_to_its_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("OMNIGENT_CONFIG_HOME", "PYTEST_XDIST_WORKER", "OMNIGENT_REPRO_SERVER_URL"):
+        monkeypatch.delenv(name, raising=False)
+    config = cast(Config, _ConfigStub({"numprocesses": 2}))
+    configuration._isolate_config_home(config)
+    assert "OMNIGENT_CONFIG_HOME" not in os.environ
+    configuration.pytest_unconfigure(config)
+    assert "OMNIGENT_CONFIG_HOME" not in os.environ

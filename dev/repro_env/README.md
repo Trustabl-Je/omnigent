@@ -83,8 +83,8 @@ variables must be supplied together; use the wrapper rather than setting only
 one of them.
 
 Standalone UI runs give each pytest process a private `OMNIGENT_CONFIG_HOME`
-seeded with a copy of the user config, so native mock fixtures never edit the
-real file. When the caller sets `OMNIGENT_CONFIG_HOME`, the fixtures instead
+seeded with copies of the user `config.yaml` and file-backed `secrets.json`, so
+native mock fixtures never edit the real files. When the caller sets `OMNIGENT_CONFIG_HOME`, the fixtures instead
 save its existing provider config to an owner-only `.e2e-backup` file next to
 the resolved target before replacing it and restore it on exit. A config symlink
 remains intact. If the test process is killed, recover that backup before

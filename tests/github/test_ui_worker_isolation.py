@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
-
-from tests.helpers import ui_configuration as configuration
 
 pytest_plugins = ["pytester"]
 _ROOT = Path(__file__).resolve().parents[2]
 _USER_CONFIG = "user: real\n"
+_USER_SECRETS = '{"provider-key": "real"}\n'
 
 # Each worker installs its own mock provider, then waits until the other worker
 # has too, so a shared config file would be overwritten or refuse the backup.
@@ -37,9 +34,10 @@ def test_{name}():
             assert time.monotonic() < deadline, "the two workers never overlapped"
             time.sleep(0.05)
         config = global_config_path().read_text()
-    (records / f"{{worker}}.json").write_text(json.dumps(
-        {{"path": str(global_config_path()), "seeded": seeded, "config": config}}
-    ))
+    secrets = (global_config_path().parent / "secrets.json").read_text()
+    (records / f"{{worker}}.json").write_text(json.dumps({{
+        "path": str(global_config_path()), "seeded": seeded, "config": config, "secrets": secrets
+    }}))
 """
 
 
@@ -48,6 +46,7 @@ def _configure(pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch) -> Pa
     home = pytester.path / "home"
     (home / ".omnigent").mkdir(parents=True)
     (home / ".omnigent" / "config.yaml").write_text(_USER_CONFIG)
+    (home / ".omnigent" / "secrets.json").write_text(_USER_SECRETS)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv(
         "PYTHONPATH", os.pathsep.join([str(_ROOT), os.environ.get("PYTHONPATH", "")])
@@ -74,6 +73,13 @@ def pytest_addoption(parser):
     return home
 
 
+def _assert_user_files_untouched(home: Path) -> None:
+    user_dir = home / ".omnigent"
+    assert sorted(path.name for path in user_dir.iterdir()) == ["config.yaml", "secrets.json"]
+    assert (user_dir / "config.yaml").read_text() == _USER_CONFIG
+    assert (user_dir / "secrets.json").read_text() == _USER_SECRETS
+
+
 def test_parallel_workers_get_separate_config_homes(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -90,22 +96,24 @@ def test_parallel_workers_get_separate_config_homes(
     }
     for worker, record in records.items():
         assert record["seeded"] == _USER_CONFIG
+        assert record["secrets"] == _USER_SECRETS
         assert f"http://mock-{worker}" in record["config"]
         assert not Path(record["path"]).is_relative_to(home)
         assert not Path(record["path"]).parent.exists()
     assert records["gw0"]["path"] != records["gw1"]["path"]
-    assert (home / ".omnigent" / "config.yaml").read_text() == _USER_CONFIG
-    assert sorted(path.name for path in (home / ".omnigent").iterdir()) == ["config.yaml"]
+    _assert_user_files_untouched(home)
 
 
-@pytest.mark.parametrize("mode", ["default", "caller", "external", "repro"])
+@pytest.mark.parametrize("mode", ["default", "empty", "caller", "external", "repro"])
 def test_serial_run_isolates_only_its_own_stack(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
     home = _configure(pytester, monkeypatch)
     caller_home = pytester.path / "caller"
     args = ["-q"]
-    if mode == "caller":
+    if mode == "empty":
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "")
+    elif mode == "caller":
         caller_home.mkdir()
         monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(caller_home))
     elif mode == "external":
@@ -118,53 +126,32 @@ import json, os
 from pathlib import Path
 
 def test_record():
+    config_home = os.environ.get("OMNIGENT_CONFIG_HOME")
+    copied = {}
+    if config_home and config_home != os.environ["HOME"]:
+        for name in ("config.yaml", "secrets.json"):
+            path = Path(config_home, name)
+            if path.exists():
+                copied[name] = [path.read_text(), oct(path.stat().st_mode & 0o777)]
     Path(os.environ["ISOLATION_RECORDS"], "serial.json").write_text(
-        json.dumps(os.environ.get("OMNIGENT_CONFIG_HOME"))
+        json.dumps({"home": config_home, "copied": copied})
     )
 """)
     result = pytester.runpytest_subprocess(*args)
     result.assert_outcomes(passed=1)
-    config_home = json.loads((pytester.path / "serial.json").read_text())
-    if mode == "default":
-        assert not Path(config_home).is_relative_to(home)
-        assert not Path(config_home).exists()
+    record = json.loads((pytester.path / "serial.json").read_text())
+    if mode in ("default", "empty"):
+        assert not Path(record["home"]).is_relative_to(home)
+        assert not Path(record["home"]).exists()
+        assert record["copied"] == {
+            "config.yaml": [_USER_CONFIG, "0o600"],
+            "secrets.json": [_USER_SECRETS, "0o600"],
+        }
     elif mode == "caller":
-        assert config_home == str(caller_home)
+        assert record["home"] == str(caller_home)
     else:
-        assert config_home is None
-    assert (home / ".omnigent" / "config.yaml").read_text() == _USER_CONFIG
-
-
-@dataclass
-class _ConfigStub:
-    options: dict[str, Any] = field(default_factory=dict)
-    stash: pytest.Stash = field(default_factory=pytest.Stash)
-
-    def getoption(self, name: str, default: Any = None) -> Any:
-        return self.options.get(name, default)
-
-
-def test_worker_replaces_and_restores_an_inherited_suite_config_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    inherited = tmp_path / "controller"
-    inherited.mkdir()
-    (inherited / "config.yaml").write_text("controller copy\n")
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(inherited))
-    monkeypatch.setenv("OMNIGENT_UI_TESTS_CONFIG_HOME", str(inherited))
-    monkeypatch.delenv("OMNIGENT_REPRO_SERVER_URL", raising=False)
-    config = cast(pytest.Config, _ConfigStub())
-    configuration._isolate_config_home(config)
-    worker_home = Path(os.environ["OMNIGENT_CONFIG_HOME"])
-    assert worker_home != inherited
-    assert os.environ["OMNIGENT_UI_TESTS_CONFIG_HOME"] == str(worker_home)
-    assert (worker_home / "config.yaml").read_text() == "controller copy\n"
-    assert oct((worker_home / "config.yaml").stat().st_mode & 0o777) == "0o600"
-    configuration.pytest_unconfigure(config)
-    assert os.environ["OMNIGENT_CONFIG_HOME"] == str(inherited)
-    assert os.environ["OMNIGENT_UI_TESTS_CONFIG_HOME"] == str(inherited)
-    assert not worker_home.exists()
-    assert (inherited / "config.yaml").read_text() == "controller copy\n"
+        assert record["home"] is None
+    _assert_user_files_untouched(home)
 
 
 def test_parallel_workers_keep_separate_playwright_output(
