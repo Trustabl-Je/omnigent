@@ -107,7 +107,7 @@ interface BlockRendererProps {
   showsWorking?: boolean;
   /** Start a fold containing a mid-turn user interjection open. */
   defaultExpanded?: boolean;
-  /** Opt-in: fold all but the turn's last assistant message with the work. */
+  /** Opt-in: fold progress narration (see `narrationFolds`) with the work. */
   foldNarration?: boolean;
 }
 
@@ -233,9 +233,8 @@ export function BlockRenderer({
     showsWorking,
   });
 
-  // A native assistant message has no reliable final-answer marker.
   // Keep each message visible even when a later tool call follows it,
-  // unless the user opted into folding all but the last message.
+  // unless the user opted into folding narration.
   const partition = partitionTurn(items, foldsNarration({ items, turnLifecycle, foldNarration }));
   const workRunCount = partition.segments.filter((segment) => segment.kind === "work").length;
   // Once the fold has SHOWN on a settled bubble, possibly-live no
@@ -489,8 +488,8 @@ function partitionTurn(items: RenderItem[], foldNarration = false): TurnPartitio
 }
 
 /**
- * Which messages `foldNarration` folds. A turn with a harness answer phase
- * (Codex) folds only its commentary; otherwise all but the last message folds.
+ * Which messages `foldNarration` folds, decided per bubble. One with a harness
+ * answer phase (Codex) folds only commentary; otherwise all but its last message.
  */
 function narrationFolds(items: RenderItem[]): (item: RenderItem, index: number) => boolean {
   const hasAnswerPhase = items.some(
