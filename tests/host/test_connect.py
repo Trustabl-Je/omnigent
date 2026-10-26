@@ -2617,15 +2617,17 @@ async def test_cancelled_account_probe_does_not_block_event_loop_shutdown(
 
     runner = threading.Thread(target=_run_host_loop)
     runner.start()
+    cancellation_observed = False
     try:
         assert await asyncio.to_thread(probe_started.wait, 1)
         assert await asyncio.to_thread(shutdown_finished.wait, 1)
     finally:
         probe_release.set()
+        cancellation_observed = await asyncio.to_thread(probe_cancelled.wait, 1)
         await asyncio.to_thread(runner.join, 2)
 
     assert not runner.is_alive()
-    assert probe_cancelled.is_set()
+    assert cancellation_observed
     assert errors == []
 
 
