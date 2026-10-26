@@ -15,6 +15,7 @@ from omnigent import harness_accounts as account_types
 from omnigent.inner import _proc
 from omnigent.onboarding import harness_accounts, harness_login
 from omnigent.onboarding.opencode_auth import OpenCodeAuthSummary
+from tests._helpers.polling import poll_until
 
 
 def _executable(path: Path, body: str) -> None:
@@ -220,7 +221,7 @@ time.sleep(60)
 
     assert not worker.is_alive()
     assert result == [{"kind": "unknown"}]
-    assert not _proc.process_alive(child_pid)
+    poll_until(lambda: not _proc.process_alive(child_pid), timeout_s=2, interval_s=0.01)
 
 
 def test_opencode_probe_returns_only_non_secret_metadata(
