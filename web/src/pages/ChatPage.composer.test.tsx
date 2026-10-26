@@ -1036,13 +1036,13 @@ describe("Composer slash-command menu", () => {
     expect(props.onSend).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["accepts", { clear_event: true }],
-    ["predates", {}],
-  ] as const)("claude-native /clear when the server %s the clear control", (_label, advertised) => {
+  function renderClearComposer(
+    harness: "claude-native" | "codex-native",
+    advertised: Partial<typeof FALLBACK_SERVER_INFO>,
+  ) {
     const { sessionHarness } = useChatStore.getState();
     onTestFinished(() => useChatStore.setState({ sessionHarness }));
-    useChatStore.setState({ sessionHarness: "claude-native" });
+    useChatStore.setState({ sessionHarness: harness });
     const clearContext = vi.spyOn(useChatStore.getState(), "clearContext").mockResolvedValue();
     const props = composerProps({ isNativeWrapper: true });
     render(
@@ -1051,18 +1051,34 @@ describe("Composer slash-command menu", () => {
       </CapabilitiesProvider>,
     );
     fireEvent.change(textarea(), { target: { value: "/cle" } });
-    if ("clear_event" in advertised) {
+    return { clearContext, onSend: props.onSend };
+  }
+
+  it.each(["claude-native", "codex-native"] as const)(
+    "%s /clear runs the clear control when the server accepts it",
+    (harness) => {
+      const { clearContext, onSend } = renderClearComposer(harness, { clear_event: true });
       fireEvent.click(screen.getByTestId("slash-menu-item-clear"));
       expect(clearContext).toHaveBeenCalledOnce();
-      expect(props.onSend).not.toHaveBeenCalled();
-      return;
-    }
-    expect(screen.queryByTestId("slash-menu-item-clear")).toBeNull();
-    fireEvent.change(textarea(), { target: { value: "/clear" } });
-    fireEvent.keyDown(textarea(), { key: "Enter" });
-    expect(clearContext).not.toHaveBeenCalled();
-    expect(props.onSend).toHaveBeenCalledExactlyOnceWith("/clear", undefined);
-  });
+      expect(onSend).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["claude-native", {}],
+    ["claude-native", { clear_event: false }],
+    ["codex-native", {}],
+  ] as const)(
+    "%s sends a typed /clear as text when the server advertises %o",
+    (harness, advertised) => {
+      const { clearContext, onSend } = renderClearComposer(harness, advertised);
+      expect(screen.queryByTestId("slash-menu-item-clear")).toBeNull();
+      fireEvent.change(textarea(), { target: { value: "/clear" } });
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+      expect(clearContext).not.toHaveBeenCalled();
+      expect(onSend).toHaveBeenCalledExactlyOnceWith("/clear", undefined);
+    },
+  );
 
   it("Tab completes a match found only mid-name (exercises menuMatches, not just the render filter)", () => {
     render(<Composer {...composerProps()} />);
