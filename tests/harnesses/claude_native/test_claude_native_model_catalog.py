@@ -198,8 +198,12 @@ async def test_catalog_uses_cli_managed_picker_for_every_launch_config(
 
 @pytest.mark.parametrize("failure", [None, "unsupported", "exit", "timeout"])
 async def test_catalog_falls_back_for_older_claude(
-    monkeypatch: pytest.MonkeyPatch, failure: str | None
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str | None
 ) -> None:
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        json.dumps({"harness": {"claude-native": {"command": "claude-wrapper", "args": ["--"]}}})
+    )
     launches = _stub_picker(
         monkeypatch,
         None,
@@ -215,7 +219,7 @@ async def test_catalog_falls_back_for_older_claude(
     ]
     assert len(launches) == 3
     assert "--input-format" in launches[0]
-    assert launches[1][:2] == ("-p", "/model")
+    assert launches[1][:3] == ("--", "-p", "/model")
     assert "--input-format" not in launches[1]
     assert "--model" in launches[2]
 

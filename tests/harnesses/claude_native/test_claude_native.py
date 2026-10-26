@@ -11047,10 +11047,42 @@ def _picker_response(*aliases: str) -> bytes:
     ).encode()
 
 
-async def test_probe_claude_model_options_runs_bare(
+@pytest.mark.parametrize(
+    ("harness_config", "path_override", "expected_command", "expected_prefix"),
+    [
+        ({}, None, "claude", []),
+        ({"command": "claude-wrapper", "args": ["--"]}, None, "claude-wrapper", ["--"]),
+        (
+            {"command": "env", "args": ["CLAUDE_MODE=gateway", "claude-wrapper", "--"]},
+            None,
+            "env",
+            ["CLAUDE_MODE=gateway", "claude-wrapper", "--"],
+        ),
+        (
+            {"command": "claude-wrapper", "args": ["--"]},
+            "claude-override",
+            "claude-override",
+            ["--"],
+        ),
+    ],
+)
+async def test_probe_claude_model_options_uses_harness_startup_config(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    harness_config: dict[str, object],
+    path_override: str | None,
+    expected_command: str,
+    expected_prefix: list[str],
 ) -> None:
-    """An unconfigured launch reads the CLI picker without injecting settings."""
+    """Enumeration and alias resolution use the terminal's command and base args."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_LAUNCHER", raising=False)
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+    if path_override is not None:
+        monkeypatch.setenv("OMNIGENT_CLAUDE_PATH", path_override)
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({"harness": {"claude-native": harness_config}})
+    )
 
     class _FakeProcess:
         returncode = 0
@@ -11062,6 +11094,8 @@ async def test_probe_claude_model_options_runs_bare(
             )
 
     async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
+        assert command == expected_command
+        assert list(args[: len(expected_prefix) + 1]) == [*expected_prefix, "-p"]
         # No --settings without an apiKeyHelper to deliver.
         assert "--settings" not in args
         return _FakeProcess()
@@ -11160,6 +11194,7 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
 
 async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """The probe launches Claude Code with the exact launch env.
 
@@ -11168,6 +11203,7 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
     apiKeyHelper is delivered via ``--settings`` — so the enumeration
     answers for the session the user would actually get.
     """
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
     monkeypatch.setenv("CLAUDECODE", "1")
     captured: dict[str, Any] = {}
@@ -11761,8 +11797,9 @@ def _point_claude_at(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
 def test_catalog_fingerprint_changes_when_the_cli_is_upgraded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapped: bool
 ) -> None:
     """An upgraded Claude Code misses the catalog its predecessor wrote.
 
@@ -11774,9 +11811,17 @@ def test_catalog_fingerprint_changes_when_the_cli_is_upgraded(
     new_release = tmp_path / "2.1.250"
     old_release.write_text("old")
     new_release.write_text("newer build")
+    old_release.chmod(0o755)
+    new_release.chmod(0o755)
     link = tmp_path / "claude"
     link.symlink_to(old_release)
     _point_claude_at(monkeypatch, link)
+    if wrapped:
+        monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(
+            "omnigent.claude_launcher.resolve_claude_launch",
+            lambda command, args: ("env", [str(link), *args]),
+        )
 
     before = claude_native.claude_catalog_fingerprint(None)
 
@@ -11807,6 +11852,29 @@ def test_catalog_fingerprint_survives_a_missing_binary(
     _point_claude_at(monkeypatch, tmp_path / "absent")
 
     assert isinstance(claude_native.claude_catalog_fingerprint(None), str)
+
+
+def test_catalog_fingerprint_changes_with_launch_command_and_args(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed wrapper or its mode must not reuse the previous model catalog."""
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("OMNIGENT_CLAUDE_LAUNCHER", raising=False)
+    monkeypatch.delenv("OMNIGENT_CLAUDE_PATH", raising=False)
+    fingerprints = {claude_native.claude_catalog_fingerprint(None)}
+    for command, args in [
+        ("claude-wrapper-a", ["--"]),
+        ("claude-wrapper-b", ["--"]),
+        ("env", ["CLAUDE_MODE=direct", "claude-wrapper-a", "--"]),
+        ("env", ["CLAUDE_MODE=gateway", "claude-wrapper-a", "--"]),
+    ]:
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"harness": {"claude-native": {"command": command, "args": args}}})
+        )
+        fingerprint = claude_native.claude_catalog_fingerprint(None)
+        assert fingerprint not in fingerprints
+        assert claude_native.claude_catalog_fingerprint(None) == fingerprint
+        fingerprints.add(fingerprint)
 
 
 # ── ambient gateway detection ─────────────────────────────

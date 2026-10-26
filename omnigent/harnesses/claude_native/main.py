@@ -940,6 +940,8 @@ def _claude_model_probe_invocation(
     :returns: ``(command, launch_args, env)`` ready to exec.
     """
     from omnigent.claude_launcher import resolve_claude_launch
+    from omnigent.config import load_effective_config
+    from omnigent.harness_startup_config import resolve_harness_args, resolve_harness_command
 
     args = ["-p"]
     if stream_input:
@@ -962,7 +964,10 @@ def _claude_model_probe_invocation(
     )
     if claude_config is not None and claude_config.api_key_helper:
         args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
-    command, launch_args = resolve_claude_launch("claude", args)
+    cfg = load_effective_config()
+    command = resolve_harness_command("claude-native", default="claude", cfg=cfg)
+    launch_args = resolve_harness_args("claude-native", tuple(args), cfg=cfg)
+    command, launch_args = resolve_claude_launch(command, launch_args)
     env = dict(os.environ)
     env.update(build_native_claude_terminal_env(claude_config))
     env.update(
@@ -1310,16 +1315,15 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
     The Claude Code executable is part of the key. The catalog holds that
     binary's own answer, so an upgraded CLI must re-probe instead of
     serving model names the previous release printed. The binary is
-    resolved the same way the probe launches it.
+    resolved the same way the probe launches it, including wrapper arguments.
 
     :param claude_config: The resolved launch config, or ``None``.
     :returns: A stable fingerprint string.
     """
-    from omnigent.claude_launcher import resolve_claude_launch
     from omnigent.models.model_catalog_store import binary_identity, fingerprint_of
     from omnigent.onboarding.ambient import claude_managed_model_picker
 
-    command, _ = resolve_claude_launch("claude", [])
+    command, launch_args, _ = _claude_model_probe_invocation(claude_config, stream_input=True)
     ambient_gateway = None
     if claude_config is None:
         managed_base_url, _ = managed_claude_gateway_signal()
@@ -1331,7 +1335,10 @@ def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) ->
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
         sorted(claude_config.routable_models) if claude_config is not None else None,
+        command,
+        launch_args,
         binary_identity(command),
+        binary_identity("claude"),
         ambient_gateway,
         claude_managed_model_picker() if claude_config is None else None,
     )
