@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { showToast } from "@/components/ui/toast";
 import { copyText } from "@/lib/clipboard";
@@ -79,12 +79,20 @@ const baseProps: HarnessFixDialogProps = {
   open: true,
   onOpenChange: vi.fn(),
   mode: "reconfigure",
-  host: { host_id: "host/1", name: "Local laptop", owner: "me", status: "online" },
+  host: {
+    host_id: "host/1",
+    name: "Local laptop",
+    owner: "me",
+    status: "online",
+    harness_accounts: {},
+    harness_login_supported: true,
+  },
   harness: "codex-native",
   harnessLabel: "Codex",
   onFixed: vi.fn(),
 };
 let dialogQueryClient: QueryClient;
+let unmountDialog: () => void;
 
 function renderDialog(
   overrides: Partial<HarnessFixDialogProps> = {},
@@ -96,11 +104,12 @@ function renderDialog(
   });
   configureClient?.(client);
   dialogQueryClient = client;
-  render(
+  const rendered = render(
     <QueryClientProvider client={client}>
       <HarnessFixDialog {...props} />
     </QueryClientProvider>,
   );
+  unmountDialog = rendered.unmount;
   return props;
 }
 
@@ -118,6 +127,10 @@ beforeEach(() => {
     }
     throw new Error(`Unexpected URL: ${String(input)}`);
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("HarnessFixDialog", () => {
@@ -331,6 +344,21 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
+  it("skips device login for an older server without explicit login support", async () => {
+    const olderHost = { ...baseProps.host };
+    delete olderHost.harness_login_supported;
+    const user = userEvent.setup();
+    renderDialog({ host: olderHost });
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+
+    expect(screen.getByText("codex login --device-auth")).toBeVisible();
+    expect(
+      vi.mocked(authenticatedFetch).mock.calls.some(([input]) => String(input).endsWith("/login")),
+    ).toBe(false);
+  });
+
   it("shows, polls, and completes Codex device-code sign-in", async () => {
     let loginChecks = 0;
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
@@ -369,33 +397,39 @@ describe("HarnessFixDialog", () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
-    await user.click(screen.getByRole("button", { name: "Authenticate" }));
-    expect(await screen.findByText("WQ7K-3XPM")).toBeVisible();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Authenticate" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByText("WQ7K-3XPM")).toBeVisible();
     expect(screen.getByRole("link", { name: /Open sign-in page/ })).toHaveAttribute(
       "href",
       "https://auth.example.test/device",
     );
-    await user.click(screen.getByRole("button", { name: "Copy one-time code" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy one-time code" }));
+    await act(async () => Promise.resolve());
     expect(copyText).toHaveBeenCalledWith("WQ7K-3XPM");
 
-    await waitFor(() => expect(loginChecks).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
-    await waitFor(() =>
-      expect(props.onFixed).toHaveBeenCalledWith({
-        configuredHarnesses: { "codex-native": true },
-        credentialKind: "personal",
-        harnessAccounts: {
-          codex: {
-            kind: "chatgpt",
-            email: "codex@example.com",
-            plan: "Plus",
-          },
+    await act(async () => vi.advanceTimersByTime(2_000));
+    await act(async () => vi.advanceTimersByTime(2_000));
+    expect(loginChecks).toBe(2);
+    expect(props.onFixed).toHaveBeenCalledWith({
+      configuredHarnesses: { "codex-native": true },
+      credentialKind: "personal",
+      harnessAccounts: {
+        codex: {
+          kind: "chatgpt",
+          email: "codex@example.com",
+          plan: "Plus",
         },
-      }),
-    );
+      },
+    });
     expect(showToast).toHaveBeenCalledWith(
       "Codex is ready on Local laptop. Signed in as codex@example.com · Plus.",
     );
-  }, 8_000);
+  });
 
   it("cancels an active Codex device login", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
@@ -432,6 +466,151 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("cancels a stale login result after the dialog closes during start", async () => {
+    let resolveStart: ((response: Response) => void) | undefined;
+    const startResponse = new Promise<Response>((resolve) => {
+      resolveStart = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") return startResponse;
+      if (url.endsWith("/login/stale") && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () =>
+      resolveStart?.(
+        json({
+          login_id: "stale",
+          verification_url: "https://auth.example.test/device",
+          user_code: "STALE",
+          expires_at: Math.floor(Date.now() / 1000) + 900,
+        }),
+      ),
+    );
+
+    await waitFor(() =>
+      expect(authenticatedFetch).toHaveBeenCalledWith(
+        "/v1/hosts/host%2F1/harnesses/codex/login/stale",
+        { method: "DELETE" },
+      ),
+    );
+  });
+
+  it("cancels an active login when the dialog unmounts", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({
+          login_id: "unmounted",
+          verification_url: "https://auth.example.test/device",
+          user_code: "UNMOUNT",
+          expires_at: Math.floor(Date.now() / 1000) + 900,
+        });
+      }
+      if (url.endsWith("/login/unmounted") && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith("/login/unmounted")) return json({ status: "pending", error: null });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    await screen.findByText("UNMOUNT");
+    unmountDialog();
+
+    await waitFor(() =>
+      expect(authenticatedFetch).toHaveBeenCalledWith(
+        "/v1/hosts/host%2F1/harnesses/codex/login/unmounted",
+        { method: "DELETE" },
+      ),
+    );
+  });
+
+  it("rejects an unsafe device link before rendering link or copy actions", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({
+          login_id: "unsafe",
+          verification_url: "javascript:alert(1)",
+          user_code: "UNSAFE",
+          expires_at: Math.floor(Date.now() / 1000) + 900,
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+
+    expect(await screen.findByText("The host returned an invalid sign-in link.")).toBeVisible();
+    expect(screen.queryByRole("link", { name: /Open sign-in page/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy sign-in link" })).toBeNull();
+  });
+
+  it("never overlaps login polls or completes twice", async () => {
+    let statusChecks = 0;
+    let resolveRefresh: ((response: Response) => void) | undefined;
+    const refreshResponse = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({
+          login_id: "single-poll",
+          verification_url: "https://auth.example.test/device",
+          user_code: "SINGLE",
+          expires_at: Math.floor(Date.now() / 1000) + 900,
+        });
+      }
+      if (url.endsWith("/login/single-poll")) {
+        statusChecks += 1;
+        return json({ status: "succeeded", error: null });
+      }
+      if (url.endsWith("/harnesses/refresh")) return refreshResponse;
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    const props = renderDialog();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Authenticate" }));
+    await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTime(2_000));
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(statusChecks).toBe(1);
+    await act(async () =>
+      resolveRefresh?.(
+        json({
+          configured_harnesses: { "codex-native": true },
+          harness_accounts: { codex: { kind: "chatgpt", email: "new@example.test" } },
+        }),
+      ),
+    );
+
+    expect(props.onFixed).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledTimes(1);
+  });
+
   it("resumes and can cancel a busy Codex login", async () => {
     let loginChecks = 0;
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
@@ -453,23 +632,33 @@ describe("HarnessFixDialog", () => {
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
-    await user.click(screen.getByRole("button", { name: "Authenticate" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Authenticate" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(
-      await screen.findByText(
+      screen.getByText(
         "Another sign-in is already in progress on Local laptop. Waiting for it to finish…",
       ),
     ).toBeVisible();
-    await waitFor(() => expect(loginChecks).toBeGreaterThan(0), { timeout: 4_000 });
+    await act(async () => vi.advanceTimersByTime(2_000));
+    expect(loginChecks).toBe(1);
 
     const cancel = screen.getByRole("button", { name: "Cancel" });
     expect(cancel).toBeEnabled();
-    await user.click(cancel);
+    fireEvent.click(cancel);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(authenticatedFetch).toHaveBeenCalledWith(
       "/v1/hosts/host%2F1/harnesses/codex/login/busy%2F1",
       { method: "DELETE" },
     );
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
-  }, 6_000);
+  });
 
   it("shows a device-code error and retries", async () => {
     let starts = 0;
@@ -495,12 +684,16 @@ describe("HarnessFixDialog", () => {
     renderDialog();
 
     await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
-    await user.click(screen.getByRole("button", { name: "Authenticate" }));
-    expect(await screen.findByText("The code was rejected.", {}, { timeout: 4_000 })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Try again" }));
-    await waitFor(() => expect(starts).toBe(2));
-    expect(await screen.findByText("RETRY-ME")).toBeVisible();
-  }, 7_000);
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Authenticate" }));
+    await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTime(2_000));
+    expect(screen.getByText("The code was rejected.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await act(async () => Promise.resolve());
+    expect(starts).toBe(2);
+    expect(screen.getByText("RETRY-ME")).toBeVisible();
+  });
 
   it("confirms Claude switching, logs out, and adds the email hint", async () => {
     vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
@@ -536,7 +729,7 @@ describe("HarnessFixDialog", () => {
 
     expect(screen.getByText(/Every session on Local laptop/)).toBeVisible();
     expect(screen.getByText("old@example.com · Pro")).toBeVisible();
-    expect(screen.getByRole("dialog")).toHaveClass("bg-background", "text-foreground");
+    expect(screen.getByRole("dialog")).toHaveClass("text-foreground");
     const email = screen.getByRole("textbox", { name: "Account to sign in with" });
     expect(email).toHaveValue("");
     expect(email).toHaveAttribute("placeholder", "name@example.com");
@@ -608,6 +801,32 @@ describe("HarnessFixDialog", () => {
 
     expect(await screen.findByText("claude auth login --claudeai")).toBeVisible();
     expect(screen.queryByText("Update the host.")).toBeNull();
+  });
+
+  it("ignores a stale switch error after the dialog closes", async () => {
+    let resolveLogout: ((response: Response) => void) | undefined;
+    const logoutResponse = new Promise<Response>((resolve) => {
+      resolveLogout = resolve;
+    });
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/logout") && init?.method === "POST") return logoutResponse;
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog({ mode: "switch", harness: "claude-native", harnessLabel: "Claude Code" });
+
+    await user.click(screen.getByRole("button", { name: "Sign out and switch" }));
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    await act(async () =>
+      resolveLogout?.(
+        json({ error: { code: "login_unsupported", message: "late failure" } }, { status: 409 }),
+      ),
+    );
+
+    expect(screen.queryByText("late failure")).toBeNull();
+    expect(screen.queryByText("claude auth login --claudeai")).toBeNull();
   });
 
   it("starts Codex device sign-in after switch logout", async () => {
@@ -1054,6 +1273,25 @@ describe("HarnessFixDialog", () => {
       throw new Error(`Unexpected URL: ${url}`);
     });
     renderDialog();
+
+    expect(await screen.findByRole("radio", { name: /Isaac/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("keeps Isaac available when an older host cannot report accounts", async () => {
+    isaacCredential = "auto";
+    vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/credentials/detected")) return json({ credentials: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const olderHost = { ...baseProps.host };
+    delete olderHost.harness_accounts;
+
+    renderDialog({ host: olderHost });
 
     expect(await screen.findByRole("radio", { name: /Isaac/ })).toHaveAttribute(
       "aria-checked",

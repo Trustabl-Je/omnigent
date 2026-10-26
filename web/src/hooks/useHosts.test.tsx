@@ -26,6 +26,7 @@ function mockResponse(body: unknown, status = 200): Response {
     status,
     statusText: status === 200 ? "OK" : "Error",
     json: async () => body,
+    clone: () => mockResponse(body, status),
   } as unknown as Response;
 }
 
@@ -105,6 +106,30 @@ describe("harness account routes", () => {
       status: 409,
       code: "login_unsupported",
       message: "Update the host.",
+    });
+  });
+
+  it("rejects a javascript verification URL", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        login_id: "login-1",
+        verification_url: "javascript:alert(1)",
+        user_code: "ABCD-EFGH",
+        expires_at: 1_798_761_600,
+      }),
+    );
+
+    await expect(startHarnessLogin("host_1", "codex-native")).rejects.toThrow(
+      "invalid sign-in link",
+    );
+  });
+
+  it("uses the shared API error parser for non-string FastAPI detail", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({ detail: [{ msg: "invalid" }] }, 422));
+
+    await expect(startHarnessLogin("host_1", "codex-native")).rejects.toMatchObject({
+      status: 422,
+      message: "422 Error",
     });
   });
 

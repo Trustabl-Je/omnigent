@@ -21,6 +21,21 @@ implements them separately, so a fix for one harness does not reach the others.
   host has not configured can be hidden from the picker. When harness repair is
   enabled, Settings → Harnesses shows the missing credential as an actionable
   card; its Reconfigure control and full-card click replace a separate banner action.
+- `account-management`: Settings harness cards show the non-secret account label
+  reported by the connected host (email, plan, organization, or provider names).
+  An expired Codex account offers **Sign in again**. Codex sign-in opens a
+  device-code modal with an HTTPS sign-in link, one-time code and copy actions,
+  expiration countdown, Cancel, and Try again; a `login_busy` response resumes
+  polling the active login. Configured Codex and Claude subscriptions offer
+  **Switch account** behind a confirmation; Claude includes an optional email
+  hint that is copied into the `--email` command. The server owns the
+  `/v1/hosts/{host}/harnesses/{harness}/login` start/status/cancel routes and
+  `/logout`; account metadata and these routes are available only while harness
+  repair is enabled and the connected host advertises support.
+- `isaac-credential-policy`: `/v1/info` exposes `isaac_credential` as `on`,
+  `off`, or `auto`. `on` always offers Isaac, `off` hides it, and `auto` uses
+  host-side Databricks credential detection while failing open for older hosts
+  or servers that cannot report detection results.
 - `model-and-effort`: the harness's own model catalog, and reasoning effort where
   the harness declares it. The web picker should offer what the CLI offers.
 - `smart-routing`: Pi applies the chosen route before inference from the
@@ -148,6 +163,16 @@ only when the server enables the `import_review` release feature.
 **Harness credential repair:** Settings → Harnesses → a needs-auth harness →
 Settings. Activate either the credential card or its Reconfigure affordance;
 both open the same repair flow.
+
+**Harness account sign-in and switching:** Settings → Harnesses → Codex or
+Claude. Use **Sign in again** on an expired Codex card, or open the configured
+harness and choose **Switch account**. For Codex, open or copy the HTTPS device
+link, copy the one-time code, and wait for the countdown/poller to finish; use
+Cancel to stop the host login or Try again after a terminal error. If another
+Codex login is already active, the dialog resumes its status instead of starting
+a second one. For Claude, confirm the sign-out and optionally enter the target
+email; the dialog presents the supported login command with a shell-quoted
+`--email` hint. Older hosts and servers fall back to the copyable CLI command.
 
 **Idle reap:** finish a turn, then leave the session alone past the idle window:
 a web session with its Terminal view open but untouched or its tabs closed, a

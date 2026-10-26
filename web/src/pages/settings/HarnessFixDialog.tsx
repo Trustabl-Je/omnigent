@@ -22,6 +22,7 @@ import { showToast } from "@/components/ui/toast";
 import {
   fetchHosts,
   fetchHarnessLogin,
+  isSecureVerificationUrl,
   cancelHarnessLogin,
   logoutHarnessOnHost,
   refreshHarnessesOnHost,
@@ -125,7 +126,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     credentialFamily !== null &&
     (isaacMode === "on" ||
       (shouldDetectIsaac &&
-        (detectedCredentials.isError ||
+        (host.harness_accounts === undefined ||
+          detectedCredentials.isError ||
           detectedCredentials.data?.some((credential) => credential.family === "databricks") ===
             true)));
   const credentialDecisionPending =
@@ -165,6 +167,8 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const [deviceLogin, setDeviceLogin] = useState<DeviceLoginState>(null);
   const [secondsRemaining, setSecondsRemaining] = useState(0);
   const runId = useRef(0);
+  const activeLogin = useRef<string | null>(null);
+  const pollAbort = useRef<AbortController | null>(null);
   const credentialDefaultSettled = useRef(false);
   const initialPhaseRef = useRef(initialPhase);
   initialPhaseRef.current = initialPhase;
@@ -210,9 +214,18 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     setError("");
     setDeviceLogin(null);
     setPhase("progress");
+    if (host.harness_login_supported !== true) {
+      setPhase("personal");
+      return;
+    }
     try {
       const result = await startHarnessLogin(hostId, harness);
-      if (runId.current !== id) return;
+      const loginId = result.kind === "busy" ? result.login_id : result.login_id;
+      if (runId.current !== id) {
+        void cancelHarnessLogin(hostId, harness, loginId).catch(() => undefined);
+        return;
+      }
+      activeLogin.current = loginId;
       if (result.kind === "busy") {
         setDeviceLogin({ kind: "resuming", loginId: result.login_id });
         return;
@@ -232,7 +245,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       setError(reason instanceof Error ? reason.message : "Couldn’t start sign-in.");
       setPhase("device-error");
     }
-  }, [harness, hostId]);
+  }, [harness, host.harness_login_supported, hostId]);
 
   const authenticate = useCallback(
     (selected: HarnessCredentialKind) => {
@@ -311,6 +324,9 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (mode === "update" && installableRef.current) void startRef.current();
     return () => {
       runId.current += 1;
+      const loginId = activeLogin.current;
+      activeLogin.current = null;
+      if (loginId) void cancelHarnessLogin(hostId, harness, loginId).catch(() => undefined);
     };
   }, [harness, hostId, mode, open]);
 
@@ -337,9 +353,9 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
 
   const setOpen = (nextOpen: boolean) => {
     if (!nextOpen) runId.current += 1;
-    if (!nextOpen && deviceLogin) {
-      const loginId =
-        deviceLogin.kind === "code" ? deviceLogin.login.login_id : deviceLogin.loginId;
+    if (!nextOpen && activeLogin.current) {
+      const loginId = activeLogin.current;
+      activeLogin.current = null;
       void cancelHarnessLogin(hostId, harness, loginId).catch(() => undefined);
     }
     onOpenChange(nextOpen);
@@ -459,6 +475,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       if (accountKey === "codex") await startDeviceLogin();
       else setPhase("personal");
     } catch (reason) {
+      if (runId.current !== id) return;
       if (
         reason instanceof ApiError &&
         reason.status === 409 &&
@@ -485,10 +502,19 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (!deviceLogin) return;
     const loginId = deviceLogin.kind === "code" ? deviceLogin.login.login_id : deviceLogin.loginId;
     let stopped = false;
+    let timer: number | undefined;
+    const controller = new AbortController();
+    pollAbort.current?.abort();
+    pollAbort.current = controller;
     const poll = async () => {
       try {
-        const result = await fetchHarnessLogin(hostId, harness, loginId);
-        if (stopped || result.status === "pending") return;
+        const result = await fetchHarnessLogin(hostId, harness, loginId, controller.signal);
+        if (stopped) return;
+        if (result.status === "pending") {
+          timer = window.setTimeout(() => void poll(), 2000);
+          return;
+        }
+        activeLogin.current = null;
         if (result.status === "succeeded") {
           let configuredHarnesses = result.configured_harnesses;
           let harnessAccounts = result.harness_accounts;
@@ -514,17 +540,20 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
         setError(result.error || `Sign-in ${result.status}.`);
         setPhase("device-error");
       } catch (reason) {
-        if (!stopped) {
+        if (!stopped && !(reason instanceof DOMException && reason.name === "AbortError")) {
+          activeLogin.current = null;
           setDeviceLogin(null);
           setError(reason instanceof Error ? reason.message : "Couldn’t check sign-in.");
           setPhase("device-error");
         }
       }
     };
-    const timer = window.setInterval(() => void poll(), 2000);
+    timer = window.setTimeout(() => void poll(), 2000);
     return () => {
       stopped = true;
-      window.clearInterval(timer);
+      controller.abort();
+      if (pollAbort.current === controller) pollAbort.current = null;
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [accountKey, deviceLogin, finish, harness, harnessLabel, hostId, hostName]);
 
@@ -755,6 +784,9 @@ function DeviceCodeState({
   secondsRemaining: number;
   hostName: string;
 }) {
+  if (!isSecureVerificationUrl(login.verification_url)) {
+    return <p role="alert">The host returned an invalid sign-in link.</p>;
+  }
   return (
     <div className="flex flex-col gap-4">
       <div className="flex gap-3">

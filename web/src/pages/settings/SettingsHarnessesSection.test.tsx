@@ -550,7 +550,7 @@ describe("Harness details", () => {
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
-  it("shows account identity, provider labels, and switch actions from host metadata", () => {
+  it("shows account identity and provider labels from host metadata", () => {
     hosts = [
       {
         ...ONLINE,

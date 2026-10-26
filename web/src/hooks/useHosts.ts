@@ -440,6 +440,7 @@ export async function startHarnessLogin(
     method: "POST",
   });
   if (!res.ok) {
+    const errorResponse = res.clone();
     let body: HarnessLoginErrorBody = {};
     try {
       body = (await res.json()) as HarnessLoginErrorBody;
@@ -451,23 +452,32 @@ export async function startHarnessLogin(
     if (res.status === 409 && code === "login_busy" && loginId) {
       return { kind: "busy", login_id: loginId };
     }
-    const message =
-      body.error?.message ??
-      body.message ??
-      body.detail ??
-      `${res.status} ${res.statusText}`.trim();
-    throw new ApiError(message, res.status, code);
+    throw await apiErrorFromResponse(errorResponse);
   }
   const login = (await res.json()) as HarnessLoginStart;
+  if (!isSecureVerificationUrl(login.verification_url)) {
+    throw new Error("The host returned an invalid sign-in link.");
+  }
   return { kind: "started", ...login };
+}
+
+export function isSecureVerificationUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export async function fetchHarnessLogin(
   hostId: string,
   harness: string,
   loginId: string,
+  signal?: AbortSignal,
 ): Promise<HarnessLoginStatus> {
-  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "login", loginId));
+  const res = await authenticatedFetch(harnessAccountUrl(hostId, harness, "login", loginId), {
+    signal,
+  });
   if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as HarnessLoginStatus;
 }
