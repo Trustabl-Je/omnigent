@@ -162,7 +162,7 @@ from omnigent.onboarding.harness_install import (
     harness_cli_installed,
     harness_cli_version,
     harness_setup_hint,
-    invalidate_harness_login_probe_cache,
+    invalidate_harness_probe_caches,
     try_install_harness_cli,
     ui_install_key,
 )
@@ -747,6 +747,10 @@ _RUNNER_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "OMNIGENT_HARNESS_STDERR_ENABLED",
         # Runner release flags must survive CLI -> daemon -> runner.
         "OMNIGENT_FEATURES",
+        # Idle-reap windows the runner reads at boot (``0`` disables reaping).
+        # Numeric tuning knobs, not secrets.
+        "OMNIGENT_HARNESS_IDLE_TIMEOUT_S",
+        "OMNIGENT_NATIVE_PANE_IDLE_TIMEOUT_S",
         # Opaque request-routing headers (dev/test): a JSON header map folded by
         # cli_auth.databricks_request_headers into every client→server connection
         # so a request pins to a specific server instance/replica. Must reach the
@@ -3153,9 +3157,9 @@ class HostProcess:
     async def _handle_refresh_harnesses(
         self, frame: HostRefreshHarnessesFrame
     ) -> HostRefreshHarnessesResultFrame:
-        """Force a full readiness probe, bypassing periodic and login caches."""
+        """Force a full readiness probe, bypassing periodic and CLI probe caches."""
         try:
-            invalidate_harness_login_probe_cache()
+            invalidate_harness_probe_caches()
             configured, accounts, gateway = await asyncio.gather(
                 self._probe_configured_harnesses(startup=False),
                 self._probe_harness_accounts(explicit_refresh=True),
