@@ -88,6 +88,7 @@ from omnigent.server.background_session_titles import (
     BackgroundSessionTitleCoordinator,
     RunnerBackgroundTitleGenerator,
 )
+from omnigent.server.disconnect_evidence import DisconnectEvidence, drop_attributes
 from omnigent.server.feature_flags import (
     Feature,
     FeatureFlags,
@@ -3774,7 +3775,11 @@ def create_app(
             pending.cancel()
 
     async def _mark_disconnected_runner_failed(
-        runner_id: str, reference_stamp: int | None, *, idle_shutdown: bool = False
+        runner_id: str,
+        reference_stamp: int | None,
+        *,
+        idle_shutdown: bool = False,
+        evidence: DisconnectEvidence | None = None,
     ) -> None:
         """Reconcile a dropped runner's sessions once the liveness lease expires.
 
@@ -3881,7 +3886,9 @@ def create_app(
             code="runner_disconnected",
             message="Runner disconnected unexpectedly.",
         )
+        hold_started = time.monotonic()
         hold = None if idle_shutdown else await _hold_for_offline_host(runner_id, affected)
+        hold_s = None if hold is None else time.monotonic() - hold_started
         if hold in ("runner_reconnected", "server_shutdown"):
             return
         if hold is not None:
@@ -3932,7 +3939,12 @@ def create_app(
                 runner_id,
                 len(affected),
             )
-        await _mark_runner_sessions_offline(affected, error, conversation_store)
+        await _mark_runner_sessions_offline(
+            affected,
+            error,
+            conversation_store,
+            disconnect_evidence=drop_attributes(evidence, hold_s=hold_s, hold_outcome=hold),
+        )
 
     async def _routing_host_id(convs: "list[Conversation]") -> str | None:
         """Return the host *convs*' shared runner runs on, or ``None`` when unknown."""
@@ -4141,6 +4153,7 @@ def create_app(
                 runner_id,
                 reference_stamp,
                 idle_shutdown=idle_shutdown,
+                evidence=DisconnectEvidence.from_session(connection),
             ),
             name=f"runner-disconnect-grace-{runner_id}",
         )
