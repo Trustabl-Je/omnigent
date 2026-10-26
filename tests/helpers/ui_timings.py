@@ -15,15 +15,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 def pytest_configure(config: pytest.Config) -> None:
     path = config.getoption("--ui-timing-output")
-    if path is not None:
-        if config.getoption("numprocesses", default=0):
-            raise pytest.UsageError("--ui-timing-output requires serial pytest within each shard")
-        config.pluginmanager.register(TimingRecorder(path), "ui-timing-recorder")
+    if path is None:
+        return
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker:
+        # Each xdist worker records the tests it ran in its own file.
+        path = path.with_name(f"{path.stem}-{worker}{path.suffix}")
+    elif config.getoption("numprocesses", default=0):
+        # The controller only relays worker reports; clear stale files instead.
+        for stale in [path, *path.parent.glob(f"{path.stem}-gw*{path.suffix}")]:
+            stale.unlink(missing_ok=True)
+        return
+    config.pluginmanager.register(TimingRecorder(path, worker), "ui-timing-recorder")
 
 
 class TimingRecorder:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, worker: str | None = None) -> None:
         self.path = path
+        self.worker = worker
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("")
 
@@ -40,6 +49,7 @@ class TimingRecorder:
                 "version": 1,
                 "splits": config.getoption("--splits", default=None),
                 "group": config.getoption("--group", default=None),
+                "worker": self.worker,
                 "nodeids": [item.nodeid for item in session.items],
                 "run_id": os.environ.get("GITHUB_RUN_ID"),
                 "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),

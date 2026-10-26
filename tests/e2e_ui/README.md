@@ -22,6 +22,11 @@ Shared fixture setup/teardown is attributed to the test that triggers it.
 The initial `plan` record supplies the schema version for the whole file. Its
 `commit` field is `GITHUB_SHA`: on PR runs, this is the tested merge commit.
 
+Under pytest-xdist (`-n`), each worker writes `ui-timings-<worker>.jsonl` beside
+the requested path, and the controller writes none. Every worker's `plan` lists
+the whole shard selection and names its `worker`; its `phase` records cover only
+the tests that worker ran, so combine all worker files for one shard.
+
 Download all shard files for a specific run and attempt into a fresh directory:
 
 ```sh
@@ -35,7 +40,7 @@ ID has phase records and that the final record reports exit status 0 for a
 successful nonempty shard. Compare total setup/call/teardown time across
 shards and investigate retries separately before choosing scheduling changes.
 
-To record timings locally (the option requires serial pytest):
+To record timings locally:
 
 ```sh
 uv run --no-sync pytest tests/e2e_ui -k TEST_NAME \
