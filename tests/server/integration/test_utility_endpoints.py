@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from omnigent.server.app import ServerInfoResponse
 from omnigent.server.feature_flags import Feature, FeatureFlags
-from omnigent.server.routes.sessions import _ALLOWED_EVENT_TYPES
+from omnigent.server.routes.sessions import CLIENT_SESSION_EVENT_TYPES
 from omnigent.stores.agent_store import AgentStore
 
 pytestmark = pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_info_returns_expected_fields(client: httpx.AsyncClient) -> None:
     assert data["agent_detail"] is True
     assert data["agent_config_edit"] is True
     # Gates the web's /clear for native sessions; older servers reject it.
-    assert data["session_event_types"] == sorted(_ALLOWED_EVENT_TYPES)
+    assert data["session_event_types"] == sorted(CLIENT_SESSION_EVENT_TYPES)
     assert "clear" in data["session_event_types"]
     # single_user reflects OMNIGENT_LOCAL_SINGLE_USER, which the suite's
     # conftest sets to "1" (the default local-dev posture), so it's true here.
