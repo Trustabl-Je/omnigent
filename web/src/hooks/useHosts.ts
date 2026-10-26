@@ -31,6 +31,8 @@ export interface Host {
   configured_harnesses?: Record<string, boolean | string> | null;
   /** Non-secret account metadata reported by newer hosts. */
   harness_accounts?: Record<string, HarnessAccount> | null;
+  /** Whether this connected host supports on-demand account probes. */
+  harness_accounts_supported?: boolean;
   /** Whether this connected host supports the interactive login/logout routes. */
   harness_login_supported?: boolean;
   /**
@@ -216,6 +218,48 @@ export interface RefreshHarnessesResult {
   configured_harnesses: Record<string, boolean | string>;
   gateway_inference: Record<string, boolean> | null;
   harness_accounts?: Record<string, HarnessAccount> | null;
+}
+
+export interface RefreshHarnessAccountsResult {
+  harness_accounts: Record<string, HarnessAccount> | null;
+}
+
+/** Request one throttled account probe; old servers silently opt out. */
+export async function refreshHarnessAccountsOnHost(
+  hostId: string,
+): Promise<RefreshHarnessAccountsResult | null> {
+  const res = await authenticatedFetch(
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/accounts/refresh`,
+    { method: "POST" },
+  );
+  if (res.status === 404 || res.status === 405) return null;
+  if (!res.ok) throw await apiErrorFromResponse(res);
+  return (await res.json()) as RefreshHarnessAccountsResult;
+}
+
+/** Probe accounts once when Settings selects a capable host; never poll. */
+export function useRefreshHarnessAccounts(hostId: string | null, enabled: boolean) {
+  const queryClient = useQueryClient();
+  const query = useQuery({
+    queryKey: ["harness-accounts-refresh", hostId],
+    queryFn: () => refreshHarnessAccountsOnHost(hostId as string),
+    enabled: enabled && hostId !== null,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    refetchInterval: false,
+    retry: false,
+  });
+  useEffect(() => {
+    if (hostId === null || query.data === undefined || query.data === null) return;
+    queryClient.setQueriesData<Host[]>({ queryKey: ["hosts"] }, (hosts) =>
+      hosts?.map((host) =>
+        host.host_id === hostId
+          ? { ...host, harness_accounts: query.data?.harness_accounts ?? null }
+          : host,
+      ),
+    );
+  }, [hostId, query.data, queryClient]);
+  return query;
 }
 
 /** Force the selected host to refresh harness readiness. */

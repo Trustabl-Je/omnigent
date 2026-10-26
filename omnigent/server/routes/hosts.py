@@ -75,7 +75,12 @@ from omnigent.server.feature_flags import (
     harness_install_enabled,
     resolve_feature_flags,
 )
-from omnigent.server.host_registry import HarnessLoginState, HostConnection, HostRegistry
+from omnigent.server.host_registry import (
+    HarnessLoginState,
+    HostConnection,
+    HostRegistry,
+    update_harness_accounts,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import (
     LAUNCH_TIMEOUT_ENV_VAR,
@@ -143,6 +148,8 @@ _MODEL_OPTIONS_TIMEOUT_S = 15.0
 _INSTALL_HARNESS_TIMEOUT_S = 420.0
 # A refresh only probes local CLI state; keep the UI responsive if a host stalls.
 _REFRESH_HARNESSES_TIMEOUT_S = 30.0
+_HARNESS_ACCOUNTS_REFRESH_TIMEOUT_S = 30.0
+_HARNESS_ACCOUNTS_CACHE_S = 60.0
 _HARNESS_LOGIN_START_TIMEOUT_S = 30.0
 _HARNESS_LOGIN_CANCEL_TIMEOUT_S = 10.0
 _HARNESS_LOGOUT_TIMEOUT_S = 30.0
@@ -858,7 +865,7 @@ def create_hosts_router(
             )
             conn.hello.configured_harnesses = dict(result_configured)
         if isinstance(result_accounts, dict):
-            conn.hello.harness_accounts = dict(result_accounts)
+            update_harness_accounts(conn, result_accounts)
         return conn.hello.configured_harnesses, conn.hello.harness_accounts
 
     @router.get("/hosts")
@@ -926,6 +933,9 @@ def create_hosts_router(
             ):
                 item["harness_accounts"] = conn.hello.harness_accounts
             if harness_setup_enabled:
+                item["harness_accounts_supported"] = bool(
+                    conn is not None and CAP_HARNESS_ACCOUNTS in conn.hello.capabilities
+                )
                 item["harness_login_supported"] = bool(
                     conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
                 )
@@ -983,6 +993,9 @@ def create_hosts_router(
         ):
             result["harness_accounts"] = conn.hello.harness_accounts
         if harness_setup_enabled:
+            result["harness_accounts_supported"] = bool(
+                conn is not None and CAP_HARNESS_ACCOUNTS in conn.hello.capabilities
+            )
             result["harness_login_supported"] = bool(
                 conn is not None and CAP_HARNESS_LOGIN in conn.hello.capabilities
             )
@@ -1720,6 +1733,49 @@ def create_hosts_router(
             "harness_accounts": refreshed_accounts,
             "gateway_inference": refreshed_gateway,
         }
+
+    @router.post("/hosts/{host_id}/harnesses/accounts/refresh")
+    async def refresh_host_harness_accounts(
+        request: Request,
+        host_id: str,
+    ) -> dict[str, Any]:
+        """Probe non-secret harness accounts, using a recent connection result."""
+        require_harness_install()
+        _host, conn = await _connected_owned_host(
+            request=request,
+            host_id=host_id,
+            auth_provider=auth_provider,
+            host_registry=host_registry,
+            host_store=host_store,
+        )
+        if CAP_HARNESS_ACCOUNTS not in conn.hello.capabilities:
+            raise OmnigentError(
+                "this host does not support harness account probes",
+                code=ErrorCode.LOGIN_UNSUPPORTED,
+            )
+        try:
+            result = await host_registry.request_harness_accounts(
+                conn,
+                refresh_codex=False,
+                timeout_s=_HARNESS_ACCOUNTS_REFRESH_TIMEOUT_S,
+                max_age_s=_HARNESS_ACCOUNTS_CACHE_S,
+            )
+        except ConnectionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"host '{conn.host_id}' connection lost",
+            ) from exc
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=504,
+                detail="host did not probe harness accounts within 30s",
+            ) from exc
+        if result.get("status") != "ok":
+            raise HTTPException(
+                status_code=502,
+                detail=result.get("error") or "host account probe failed",
+            )
+        return {"harness_accounts": conn.hello.harness_accounts}
 
     @router.post("/hosts/{host_id}/harnesses/{harness}/login")
     async def start_host_harness_login(

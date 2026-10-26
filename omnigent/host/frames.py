@@ -168,6 +168,8 @@ class HostFrameKind(str, Enum):
     INSTALL_HARNESS_RESULT = "host.install_harness_result"
     REFRESH_HARNESSES = "host.refresh_harnesses"
     REFRESH_HARNESSES_RESULT = "host.refresh_harnesses_result"
+    PROBE_HARNESS_ACCOUNTS = "host.probe_harness_accounts"
+    PROBE_HARNESS_ACCOUNTS_RESULT = "host.probe_harness_accounts_result"
     HARNESS_LOGIN = "host.harness_login"
     HARNESS_LOGIN_RESULT = "host.harness_login_result"
     HARNESS_LOGIN_CANCEL = "host.harness_login_cancel"
@@ -866,6 +868,24 @@ class HostRefreshHarnessesResultFrame:
 
 
 @dataclass
+class HostProbeAccountsFrame:
+    """Server → host: probe non-secret harness account metadata."""
+
+    request_id: str
+    refresh_codex: bool = False
+
+
+@dataclass
+class HostProbeAccountsResultFrame:
+    """Host → server: result of an on-demand account probe."""
+
+    request_id: str
+    status: str
+    harness_accounts: HarnessAccounts | None = None
+    error: str | None = None
+
+
+@dataclass
 class HostHarnessLoginFrame:
     """Server → host: begin a Codex device-code login."""
 
@@ -1434,6 +1454,8 @@ HostFrame = (
     | HostInstallHarnessResultFrame
     | HostRefreshHarnessesFrame
     | HostRefreshHarnessesResultFrame
+    | HostProbeAccountsFrame
+    | HostProbeAccountsResultFrame
     | HostHarnessLoginFrame
     | HostHarnessLoginResultFrame
     | HostHarnessLoginCancelFrame
@@ -1775,6 +1797,24 @@ def encode_host_frame(frame: HostFrame) -> str:
                 "configured_harnesses": frame.configured_harnesses,
                 "harness_accounts": frame.harness_accounts,
                 "gateway_inference": frame.gateway_inference,
+                "error": frame.error,
+            }
+        )
+    if isinstance(frame, HostProbeAccountsFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROBE_HARNESS_ACCOUNTS.value,
+                "request_id": frame.request_id,
+                "refresh_codex": frame.refresh_codex,
+            }
+        )
+    if isinstance(frame, HostProbeAccountsResultFrame):
+        return _encode_payload(
+            {
+                "kind": HostFrameKind.PROBE_HARNESS_ACCOUNTS_RESULT.value,
+                "request_id": frame.request_id,
+                "status": frame.status,
+                "harness_accounts": frame.harness_accounts,
                 "error": frame.error,
             }
         )
@@ -2393,6 +2433,20 @@ def _decode_known_host_frame(
             return HostRefreshHarnessesFrame(request_id=_required_str(msg, "request_id"))
         case HostFrameKind.REFRESH_HARNESSES_RESULT:
             return _decode_refresh_harnesses_result(msg)
+        case HostFrameKind.PROBE_HARNESS_ACCOUNTS:
+            return HostProbeAccountsFrame(
+                request_id=_required_str(msg, "request_id"),
+                refresh_codex=(
+                    _required_bool(msg, "refresh_codex") if "refresh_codex" in msg else False
+                ),
+            )
+        case HostFrameKind.PROBE_HARNESS_ACCOUNTS_RESULT:
+            return HostProbeAccountsResultFrame(
+                request_id=_required_str(msg, "request_id"),
+                status=_required_str(msg, "status"),
+                harness_accounts=normalize_harness_accounts(msg.get("harness_accounts")),
+                error=_optional_nullable_str(msg, "error"),
+            )
         case HostFrameKind.HARNESS_LOGIN:
             return HostHarnessLoginFrame(
                 request_id=_required_str(msg, "request_id"),

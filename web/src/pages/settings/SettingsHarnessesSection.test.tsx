@@ -86,6 +86,7 @@ const STARTUP: HarnessStartup = {
 let startupData = STARTUP;
 let startupError: ApiError | null = null;
 const startupCalls = vi.fn();
+const accountRefreshCalls = vi.fn();
 let hosts: Host[] = [];
 vi.mock("@/hooks/useHosts", async (importActual) => ({
   ...(await importActual()),
@@ -99,6 +100,10 @@ vi.mock("@/hooks/useHosts", async (importActual) => ({
   useHarnessStartup: (hostId: string, harness: string) => {
     startupCalls(hostId, harness);
     return { data: startupError ? undefined : startupData, error: startupError, isPending: false };
+  },
+  useRefreshHarnessAccounts: (hostId: string | null, enabled: boolean) => {
+    accountRefreshCalls(hostId, enabled);
+    return { data: undefined, isPending: false };
   },
 }));
 
@@ -255,11 +260,24 @@ afterEach(() => {
   databricksFeatures = true;
   fixDialogProps.mockReset();
   startupCalls.mockClear();
+  accountRefreshCalls.mockClear();
   startupData = STARTUP;
   startupError = null;
 });
 
 describe("Harnesses grid", () => {
+  it("requests accounts only for a selected capable host while setup is enabled", () => {
+    hosts = [{ ...ONLINE, harness_accounts_supported: true }];
+    renderHarnesses();
+    expect(accountRefreshCalls).toHaveBeenLastCalledWith("h1", true);
+
+    cleanup();
+    accountRefreshCalls.mockClear();
+    harnessInstall = false;
+    renderHarnesses();
+    expect(accountRefreshCalls).toHaveBeenLastCalledWith("h1", false);
+  });
+
   it("preselects the linked online host and keeps it after returning to the grid", () => {
     hosts = [ONLINE, { ...ONLINE, host_id: "host & two", name: "session-host" }];
     renderHarnesses("claude-native", "?host=host%20%26%20two&tab=settings");

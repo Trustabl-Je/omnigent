@@ -30,8 +30,13 @@ implements them separately, so a fix for one harness does not reach the others.
   **Switch account** behind a confirmation; Claude includes an optional email
   hint that is copied into the `--email` command. The server owns the
   `/v1/hosts/{host}/harnesses/{harness}/login` start/status/cancel routes and
-  `/logout`; account metadata and these routes are available only while harness
-  repair is enabled and the connected host advertises support.
+  `/logout`, plus `/v1/hosts/{host}/harnesses/accounts/refresh`. Hosts never
+  probe accounts on their own: an enabled server requests one probe after
+  connection, and Settings requests one when Harnesses opens or its selected
+  host changes. The server reuses a successful result for 60 seconds. Account
+  metadata and these routes are available only while harness repair is enabled
+  and the connected host advertises support; older hosts receive no probe, and
+  older servers or flag-off servers never cause a new host to spawn one.
 - `isaac-credential-policy`: `/v1/info` exposes `isaac_credential` as `on`,
   `off`, or `auto`. `on` always offers Isaac, `off` hides it, and `auto` uses
   host-side Databricks credential detection while failing open for older hosts

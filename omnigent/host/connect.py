@@ -116,6 +116,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostProbeAccountsFrame,
+    HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
@@ -257,7 +259,6 @@ def _coerce_int(value: object) -> int:
 HARNESS_READINESS_REFRESH_INTERVAL_S = 5.0
 # Auth changes and removals need the full, potentially expensive readiness map.
 HARNESS_READINESS_FULL_REFRESH_INTERVAL_S = 60.0
-HARNESS_ACCOUNTS_REFRESH_INTERVAL_S = 300.0
 HARNESS_ACCOUNT_PROBE_TIMEOUT_S = 7.0
 HARNESS_LOGIN_START_TIMEOUT_S = 20.0
 HARNESS_LOGIN_COMPLETION_TIMEOUT_S = 15 * 60.0
@@ -3158,6 +3159,7 @@ class HostProcess:
         self, frame: HostRefreshHarnessesFrame
     ) -> HostRefreshHarnessesResultFrame:
         """Force a full readiness probe, bypassing periodic and CLI probe caches."""
+        account_generation = self._account_generation
         try:
             invalidate_harness_probe_caches()
             configured, accounts, gateway = await asyncio.gather(
@@ -3178,12 +3180,36 @@ class HostProcess:
                 status="failed",
                 error="readiness refresh failed: configured harnesses are unavailable",
             )
+        if self._account_generation == account_generation and accounts is not None:
+            self._replace_capabilities(None, None, accounts)
         return HostRefreshHarnessesResultFrame(
             request_id=frame.request_id,
             status="ok",
             configured_harnesses=configured,
-            harness_accounts=accounts,
+            harness_accounts=self._harness_accounts,
             gateway_inference=gateway,
+        )
+
+    async def _handle_probe_harness_accounts(
+        self, frame: HostProbeAccountsFrame
+    ) -> HostProbeAccountsResultFrame:
+        """Run one server-requested account probe without touching readiness."""
+        generation = self._account_generation
+        try:
+            accounts = await self._probe_harness_accounts(explicit_refresh=frame.refresh_codex)
+        except Exception as exc:
+            _logger.exception("On-demand harness account probe failed")
+            return HostProbeAccountsResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"account probe failed: {exc}",
+            )
+        if self._account_generation == generation and accounts is not None:
+            self._replace_capabilities(None, None, accounts)
+        return HostProbeAccountsResultFrame(
+            request_id=frame.request_id,
+            status="ok",
+            harness_accounts=self._harness_accounts,
         )
 
     async def _handle_harness_login(
@@ -5236,9 +5262,6 @@ class HostProcess:
         self._ensure_model_options_prewarm()
         self._ws = ws
         readiness_task = asyncio.create_task(self._harness_readiness_loop(ws))
-        accounts_task = asyncio.create_task(
-            self._harness_accounts_loop(ws), name="host-harness-accounts"
-        )
         try:
             # Reports raised while disconnected must wait until registration;
             # the server cannot route them before this connection owns the host.
@@ -5283,11 +5306,8 @@ class HostProcess:
             if (diagnostics := self._diagnostics_for(ws)) is not None:
                 diagnostics.freeze()
             readiness_task.cancel()
-            accounts_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await accounts_task
             await self._cancel_all_harness_logins()
 
     async def _harness_readiness_loop(
@@ -5343,34 +5363,6 @@ class HostProcess:
                 )
                 published_configured = configured
                 published_gateway = gateway
-
-    async def _harness_accounts_loop(
-        self,
-        ws: websockets.asyncio.client.ClientConnection,
-    ) -> None:
-        """Publish informational account metadata after connect and every five minutes."""
-        while True:
-            generation = self._account_generation
-            accounts = await self._probe_harness_accounts(explicit_refresh=False)
-            if (
-                self._account_generation == generation
-                and accounts is not None
-                and accounts != self._harness_accounts
-            ):
-                self._replace_capabilities(None, None, accounts)
-                configured = self._configured_harnesses
-                if configured is not None:
-                    await self._send_text(
-                        ws,
-                        encode_host_frame(
-                            HostHarnessReadinessFrame(
-                                configured_harnesses=configured,
-                                harness_accounts=accounts,
-                                gateway_inference=self._gateway_inference,
-                            )
-                        ),
-                    )
-            await asyncio.sleep(HARNESS_ACCOUNTS_REFRESH_INTERVAL_S)
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""
@@ -5586,22 +5578,22 @@ class HostProcess:
                 lambda: self._handle_install_harness(frame)
             )
             if install_result.status == "ok":
-                install_result.harness_accounts = await self._probe_harness_accounts(
-                    explicit_refresh=False
-                )
                 self._replace_capabilities(
                     install_result.configured_harnesses,
                     install_result.gateway_inference,
-                    install_result.harness_accounts,
                 )
             await self._send_text(ws, encode_host_frame(install_result))
+        elif isinstance(frame, HostProbeAccountsFrame):
+            await self._send_text(
+                ws,
+                encode_host_frame(await self._handle_probe_harness_accounts(frame)),
+            )
         elif isinstance(frame, HostRefreshHarnessesFrame):
             refresh_result = await self._handle_refresh_harnesses(frame)
             if refresh_result.status == "ok":
                 self._replace_capabilities(
                     refresh_result.configured_harnesses,
                     refresh_result.gateway_inference,
-                    refresh_result.harness_accounts,
                 )
             await self._send_text(ws, encode_host_frame(refresh_result))
         elif isinstance(frame, HostHarnessLoginFrame):
@@ -5626,13 +5618,9 @@ class HostProcess:
                 lambda: self._handle_store_secret(frame)
             )
             if secret_result.status == "ok":
-                secret_result.harness_accounts = await self._probe_harness_accounts(
-                    explicit_refresh=False
-                )
                 self._replace_capabilities(
                     secret_result.configured_harnesses,
                     secret_result.gateway_inference,
-                    secret_result.harness_accounts,
                 )
             await self._send_text(ws, encode_host_frame(secret_result))
         elif isinstance(frame, HostDetectCredentialsFrame):

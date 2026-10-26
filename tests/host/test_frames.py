@@ -52,6 +52,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostProbeAccountsFrame,
+    HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     HostRemoveWorktreeFrame,
@@ -2233,6 +2235,28 @@ def test_refresh_harnesses_frames_round_trip() -> None:
     assert isinstance(result, HostRefreshHarnessesResultFrame)
     assert result.configured_harnesses == {"codex-native": True}
     assert result.gateway_inference == {"codex-native": False}
+
+
+def test_probe_harness_accounts_frames_round_trip() -> None:
+    request = decode_host_frame(
+        encode_host_frame(HostProbeAccountsFrame(request_id="accounts-1", refresh_codex=True))
+    )
+    assert request == HostProbeAccountsFrame(request_id="accounts-1", refresh_codex=True)
+
+    result = decode_host_frame(
+        encode_host_frame(
+            HostProbeAccountsResultFrame(
+                request_id="accounts-1",
+                status="ok",
+                harness_accounts={"codex": {"kind": "chatgpt"}},
+            )
+        )
+    )
+    assert result == HostProbeAccountsResultFrame(
+        request_id="accounts-1",
+        status="ok",
+        harness_accounts={"codex": {"kind": "chatgpt"}},
+    )
 
 
 def test_result_frames_round_trip_gateway_inference() -> None:

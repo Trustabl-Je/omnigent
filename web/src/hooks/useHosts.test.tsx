@@ -8,10 +8,12 @@ import {
   fetchHarnessLogin,
   installHarnessOnHost,
   logoutHarnessOnHost,
+  refreshHarnessAccountsOnHost,
   startHarnessLogin,
   useDetectedCredentials,
   useHostModelOptions,
   useHosts,
+  useRefreshHarnessAccounts,
   useInstallHarness,
   useInstallingHarnesses,
   useStoreCredential,
@@ -51,6 +53,25 @@ afterEach(() => {
 });
 
 describe("harness account routes", () => {
+  it("uses the encoded account refresh route and ignores old servers", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ harness_accounts: { codex: { kind: "chatgpt" } } }))
+      .mockResolvedValueOnce(mockResponse({}, 404))
+      .mockResolvedValueOnce(mockResponse({}, 405));
+
+    await expect(refreshHarnessAccountsOnHost("host/1")).resolves.toEqual({
+      harness_accounts: { codex: { kind: "chatgpt" } },
+    });
+    await expect(refreshHarnessAccountsOnHost("old-host")).resolves.toBeNull();
+    await expect(refreshHarnessAccountsOnHost("older-host")).resolves.toBeNull();
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/v1/hosts/host%2F1/harnesses/accounts/refresh",
+      "/v1/hosts/old-host/harnesses/accounts/refresh",
+      "/v1/hosts/older-host/harnesses/accounts/refresh",
+    ]);
+  });
+
   it("uses encoded login, poll, cancel, and logout routes", async () => {
     fetchMock
       .mockResolvedValueOnce(
@@ -143,6 +164,41 @@ describe("harness account routes", () => {
       kind: "busy",
       login_id: "busy/1",
     });
+  });
+});
+
+describe("useRefreshHarnessAccounts", () => {
+  it("fetches once per selected host and never while setup is disabled", async () => {
+    fetchMock
+      .mockResolvedValueOnce(mockResponse({ harness_accounts: {} }))
+      .mockResolvedValueOnce(mockResponse({ harness_accounts: {} }));
+    const { rerender } = renderHook(
+      ({ hostId, enabled }) => useRefreshHarnessAccounts(hostId, enabled),
+      {
+        initialProps: { hostId: "host-1" as string | null, enabled: false },
+        wrapper,
+      },
+    );
+
+    await Promise.resolve();
+    expect(fetchMock).not.toHaveBeenCalled();
+    rerender({ hostId: "host-1", enabled: true });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    rerender({ hostId: "host-1", enabled: true });
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    rerender({ hostId: "host-2", enabled: true });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("treats a 404 from an older server as a successful no-op", async () => {
+    fetchMock.mockResolvedValueOnce(mockResponse({}, 404));
+    const { result } = renderHook(() => useRefreshHarnessAccounts("old-host", true), {
+      wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toBeNull();
   });
 });
 

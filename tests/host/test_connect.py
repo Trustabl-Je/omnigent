@@ -71,6 +71,8 @@ from omnigent.host.frames import (
     HostModelOptionsResultFrame,
     HostPluginsFrame,
     HostPluginsResultFrame,
+    HostProbeAccountsFrame,
+    HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     HostRunnerExitedFrame,
@@ -2565,7 +2567,7 @@ async def test_cancelled_readiness_probe_keeps_orphan_reaper_paused(
     assert host._host_subprocess_tasks == set()
 
 
-async def test_cancelled_account_probe_does_not_block_event_loop_shutdown(
+async def test_cancelled_account_probe_request_does_not_block_disconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An in-flight vendor probe cannot delay Ctrl-C past event-loop shutdown."""
@@ -2597,7 +2599,11 @@ async def test_cancelled_account_probe_does_not_block_event_loop_shutdown(
     def _run_host_loop() -> None:
         async def _cancel_probe() -> None:
             host = _make_host_process()
-            task = asyncio.create_task(host._probe_harness_accounts(explicit_refresh=False))
+            task = asyncio.create_task(
+                host._handle_probe_harness_accounts(
+                    HostProbeAccountsFrame(request_id="disconnect")
+                )
+            )
             while not probe_started.is_set():
                 await asyncio.sleep(0.01)
             task.cancel()
@@ -5130,6 +5136,54 @@ async def test_startup_capability_discovery_does_not_probe_accounts(
     assert host._harness_accounts is None
 
 
+async def test_connected_host_never_probes_accounts_without_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+    host._capabilities_initialized = True
+    host._configured_harnesses = {"codex": True}
+    probe = AsyncMock(side_effect=AssertionError("unexpected account probe"))
+    monkeypatch.setattr(host, "_probe_harness_accounts", probe)
+    monkeypatch.setattr("omnigent.host.connect.HARNESS_READINESS_REFRESH_INTERVAL_S", 0.01)
+    monkeypatch.setattr("omnigent.host.connect.HARNESS_READINESS_FULL_REFRESH_INTERVAL_S", 3600.0)
+    tunnel = _BlockingTunnel()
+
+    serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
+    try:
+        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1)
+        await asyncio.sleep(0.05)
+    finally:
+        await _cancel(serve_task)
+
+    probe.assert_not_called()
+    hello = decode_host_frame(tunnel.sent[0])
+    assert isinstance(hello, HostHelloFrame)
+    assert hello.harness_accounts is None
+
+
+async def test_probe_accounts_frame_runs_once_and_returns_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+    probe = AsyncMock(return_value={"codex": {"kind": "chatgpt"}})
+    monkeypatch.setattr(host, "_probe_harness_accounts", probe)
+    tunnel = _FakeTunnel()
+
+    await host._dispatch_host_frame(  # type: ignore[arg-type]
+        tunnel,
+        HostProbeAccountsFrame(request_id="accounts-1"),
+    )
+
+    probe.assert_awaited_once_with(explicit_refresh=False)
+    result = decode_host_frame(tunnel.sent[0])
+    assert result == HostProbeAccountsResultFrame(
+        request_id="accounts-1",
+        status="ok",
+        harness_accounts={"codex": {"kind": "chatgpt"}},
+    )
+    assert host._harness_accounts == {"codex": {"kind": "chatgpt"}}
+
+
 async def test_dispatch_codex_login_start_and_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5344,7 +5398,7 @@ async def test_disconnect_mid_login_start_closes_session_and_clears_busy(
 async def test_dispatch_store_secret_uses_orphan_reaper_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Credential writes and their account probes run inside the subprocess guard."""
+    """Credential writes run inside the subprocess guard."""
     host = _make_host_process()
     guarded: list[Callable[[], HostStoreSecretResultFrame]] = []
     expected = HostStoreSecretResultFrame(request_id="secret-guard", status="ok")
@@ -5357,11 +5411,6 @@ async def test_dispatch_store_secret_uses_orphan_reaper_guard(
 
     monkeypatch.setattr(host, "_run_host_subprocess_in_thread", _guard)
     monkeypatch.setattr(host, "_handle_store_secret", lambda frame: expected)
-    monkeypatch.setattr(
-        host,
-        "_probe_harness_accounts",
-        lambda *, explicit_refresh: asyncio.sleep(0, result=None),
-    )
     tunnel = _FakeTunnel()
 
     await host._dispatch_host_frame(  # type: ignore[arg-type]
@@ -5379,7 +5428,7 @@ async def test_dispatch_store_secret_uses_orphan_reaper_guard(
 
 
 @pytest.mark.parametrize("operation", ["install", "credential"])
-async def test_successful_write_survives_account_probe_failure(
+async def test_successful_write_does_not_implicitly_probe_accounts(
     monkeypatch: pytest.MonkeyPatch,
     operation: str,
 ) -> None:
@@ -5402,11 +5451,8 @@ async def test_successful_write_survives_account_probe_failure(
             request_id="credential", status="ok", configured_harnesses={"codex": True}
         )
         monkeypatch.setattr(host, "_handle_store_secret", lambda _frame: result)
-    monkeypatch.setattr(
-        host,
-        "_probe_harness_accounts",
-        lambda *, explicit_refresh: asyncio.sleep(0, result=None),
-    )
+    probe = AsyncMock(side_effect=AssertionError("write must not probe accounts"))
+    monkeypatch.setattr(host, "_probe_harness_accounts", probe)
     tunnel = _FakeTunnel()
 
     await host._dispatch_host_frame(tunnel, frame)  # type: ignore[arg-type]
@@ -5414,6 +5460,7 @@ async def test_successful_write_survives_account_probe_failure(
     decoded = decode_host_frame(tunnel.sent[0])
     assert decoded.status == "ok"
     assert decoded.configured_harnesses == {"codex": True}
+    probe.assert_not_called()
 
 
 def test_account_only_update_does_not_invalidate_readiness_generation() -> None:
@@ -5445,23 +5492,56 @@ async def test_stale_account_probe_cannot_overwrite_newer_login_state(
         return {"codex": {"kind": "chatgpt", "email": "before@example.test"}}
 
     monkeypatch.setattr(host, "_probe_harness_accounts", _stale_probe)
-    tunnel = _FakeTunnel()
-    task = asyncio.create_task(host._harness_accounts_loop(tunnel))
-    try:
-        await asyncio.wait_for(probe_started.wait(), timeout=1)
-        host._replace_capabilities(
-            {"codex": True},
-            None,
-            {"codex": {"kind": "none"}},
-        )
-        probe_release.set()
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-    finally:
-        await _cancel(task)
+    task = asyncio.create_task(
+        host._handle_probe_harness_accounts(HostProbeAccountsFrame(request_id="stale"))
+    )
+    await asyncio.wait_for(probe_started.wait(), timeout=1)
+    host._replace_capabilities(
+        {"codex": True},
+        None,
+        {"codex": {"kind": "none"}},
+    )
+    probe_release.set()
+    result = await task
 
     assert host._harness_accounts == {"codex": {"kind": "none"}}
-    assert tunnel.sent == []
+    assert result.harness_accounts == {"codex": {"kind": "none"}}
+
+
+async def test_stale_full_refresh_accounts_cannot_overwrite_newer_login_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = _make_host_process()
+    host._harness_accounts = {"codex": {"kind": "chatgpt", "email": "before@example.test"}}
+    probe_started = asyncio.Event()
+    probe_release = asyncio.Event()
+
+    async def _configured(*, startup: bool) -> dict[str, bool]:
+        return {"codex": True}
+
+    async def _gateway(*, startup: bool) -> dict[str, bool]:
+        return {"codex": False}
+
+    async def _stale_accounts(*, explicit_refresh: bool) -> dict[str, object]:
+        assert explicit_refresh is True
+        probe_started.set()
+        await probe_release.wait()
+        return {"codex": {"kind": "chatgpt", "email": "before@example.test"}}
+
+    monkeypatch.setattr(host, "_probe_configured_harnesses", _configured)
+    monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
+    monkeypatch.setattr(host, "_probe_harness_accounts", _stale_accounts)
+    task = asyncio.create_task(
+        host._handle_refresh_harnesses(HostRefreshHarnessesFrame(request_id="refresh"))
+    )
+    await asyncio.wait_for(probe_started.wait(), timeout=1)
+    host._replace_capabilities(None, None, {"codex": {"kind": "none"}})
+    probe_release.set()
+
+    result = await task
+
+    assert host._harness_accounts == {"codex": {"kind": "none"}}
+    assert result.harness_accounts == {"codex": {"kind": "none"}}
 
 
 def test_handle_install_harness_success_returns_refreshed_readiness(

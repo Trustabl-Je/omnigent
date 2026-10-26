@@ -44,6 +44,8 @@ from omnigent.host.frames import (
     HostHelloFrame,
     HostInstallHarnessFrame,
     HostInstallHarnessResultFrame,
+    HostProbeAccountsFrame,
+    HostProbeAccountsResultFrame,
     HostRefreshHarnessesFrame,
     HostRefreshHarnessesResultFrame,
     decode_host_frame,
@@ -205,6 +207,27 @@ async def install_setup(
             if not isinstance(text, str):
                 continue
             frame = decode_host_frame(text)
+            if isinstance(frame, HostProbeAccountsFrame):
+                probe_reply = replies.get("__accounts__", {})
+                probe_reply["count"] = int(probe_reply.get("count", 0)) + 1
+                replies["__accounts__"] = probe_reply
+                await comm.send_input(
+                    {
+                        "type": "websocket.receive",
+                        "text": encode_host_frame(
+                            HostProbeAccountsResultFrame(
+                                request_id=frame.request_id,
+                                status=probe_reply.get("status", "ok"),
+                                harness_accounts=probe_reply.get(
+                                    "harness_accounts",
+                                    {"codex": {"kind": "chatgpt"}},
+                                ),
+                                error=probe_reply.get("error"),
+                            )
+                        ),
+                    }
+                )
+                continue
             if isinstance(frame, HostHarnessLoginFrame):
                 reply = replies.get("__login__", {})
                 replies.setdefault("__started__", {})[frame.login_id] = True
@@ -610,6 +633,78 @@ async def test_refresh_harnesses_returns_fresh_host_maps(
     }
 
 
+async def test_refresh_harness_accounts_updates_hosts_and_throttles(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """A successful account probe updates list/detail and is cached for 60 seconds."""
+    app, registry, _comm, replies, _drain = install_setup
+    accounts = {"codex": {"kind": "chatgpt", "email": "person@example.test"}}
+    replies["__accounts__"] = {"harness_accounts": accounts}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+        second = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+        conn = registry.get(_HOST_ID)
+        assert conn is not None and conn.harness_accounts_probed_at is not None
+        conn.harness_accounts_probed_at -= 61
+        third = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+        listing = await client.get("/v1/hosts")
+        detail = await client.get(f"/v1/hosts/{_HOST_ID}")
+
+    assert first.status_code == second.status_code == third.status_code == 200
+    assert first.json() == second.json() == third.json() == {"harness_accounts": accounts}
+    assert replies["__accounts__"]["count"] == 2
+    assert listing.json()["hosts"][0]["harness_accounts"] == accounts
+    assert detail.json()["harness_accounts"] == accounts
+
+
+async def test_refresh_harness_accounts_rejects_unsupported_host(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, _replies, _drain = install_setup
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    conn.hello.capabilities = [
+        capability for capability in conn.hello.capabilities if capability != CAP_HARNESS_ACCOUNTS
+    ]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "login_unsupported"
+
+
+async def test_refresh_harness_accounts_rejects_offline_host(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    app, registry, _comm, _replies, _drain = install_setup
+    registry.deregister(_HOST_ID)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+
+    assert response.status_code == 409
+
+
 async def test_refresh_harnesses_failed_host_result_returns_502(
     install_setup: tuple[
         FastAPI,
@@ -651,8 +746,10 @@ async def test_refresh_harnesses_route_hidden_when_flag_off(
     )
     async with AsyncClient(transport=ASGITransport(app=off_app), base_url="http://test") as client:
         resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/refresh")
+        accounts_resp = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
 
     assert resp.status_code == 404
+    assert accounts_resp.status_code == 404
 
 
 async def test_harness_install_callable_flips_route_without_restart(
@@ -664,7 +761,14 @@ async def test_harness_install_callable_flips_route_without_restart(
     host_store = HostStore(db_uri)
     conv_store = SqlAlchemyConversationStore(db_uri)
     app = FastAPI()
-    app.include_router(create_host_tunnel_router(registry, host_store), prefix="/v1")
+    app.include_router(
+        create_host_tunnel_router(
+            registry,
+            host_store,
+            harness_install=lambda: enabled,
+        ),
+        prefix="/v1",
+    )
     app.include_router(
         create_hosts_router(
             registry,
@@ -688,9 +792,29 @@ async def test_harness_install_callable_flips_route_without_restart(
             hidden = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
             enabled = True
             visible = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/login-1")
+            refresh_task = asyncio.create_task(
+                client.post(f"/v1/hosts/{_HOST_ID}/harnesses/accounts/refresh")
+            )
+            output = await comm.receive_output(timeout=1)
+            frame = decode_host_frame(output["text"])
+            assert isinstance(frame, HostProbeAccountsFrame)
+            await comm.send_input(
+                {
+                    "type": "websocket.receive",
+                    "text": encode_host_frame(
+                        HostProbeAccountsResultFrame(
+                            request_id=frame.request_id,
+                            status="ok",
+                            harness_accounts={"codex": {"kind": "chatgpt"}},
+                        )
+                    ),
+                }
+            )
+            refreshed = await refresh_task
         assert hidden.status_code == 404
         assert visible.status_code == 200
         assert visible.json() == {"status": "pending", "error": None, "expired": False}
+        assert refreshed.status_code == 200
     finally:
         await comm.send_input({"type": "websocket.disconnect", "code": 1000})
 
@@ -1248,6 +1372,7 @@ async def test_codex_login_route_hidden_when_flag_off(
         assert response.status_code == 404
         for host_payload in (listed, detail):
             assert "harness_accounts" not in host_payload
+            assert "harness_accounts_supported" not in host_payload
             assert "harness_login_supported" not in host_payload
     finally:
         await comm.send_input({"type": "websocket.disconnect", "code": 1000})

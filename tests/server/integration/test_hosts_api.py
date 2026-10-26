@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,8 @@ from omnigent.host.frames import (
     WORKSPACE_MISSING_ERROR_CODE,
     HostHelloFrame,
     HostLaunchRunnerResultFrame,
+    HostProbeAccountsFrame,
+    decode_host_frame,
     encode_host_frame,
 )
 from omnigent.server.auth import LEVEL_OWNER
@@ -91,7 +94,7 @@ def host_api_app(
 def _build_host_api_app(
     db_uri: str,
     *,
-    harness_install: bool | None = None,
+    harness_install: bool | Callable[[], bool] | None = None,
 ) -> tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore]:
     """Build one replica's app over *db_uri*.
 
@@ -109,7 +112,11 @@ def _build_host_api_app(
     conv_store = SqlAlchemyConversationStore(db_uri)
     app = FastAPI()
     app.include_router(
-        create_host_tunnel_router(registry, host_store),
+        create_host_tunnel_router(
+            registry,
+            host_store,
+            harness_install=False if harness_install is None else harness_install,
+        ),
         prefix="/v1",
     )
     app.include_router(
@@ -366,6 +373,7 @@ async def test_harness_accounts_are_live_only_and_login_support_is_explicit(
     assert connected["harness_accounts"] == {
         "codex": {"kind": "chatgpt", "email": "person@example.test"}
     }
+    assert connected["harness_accounts_supported"] is True
     assert connected["harness_login_supported"] is True
 
     other_app, _other_registry, _other_store, _other_conversations = _build_host_api_app(
@@ -378,8 +386,47 @@ async def test_harness_accounts_are_live_only_and_login_support_is_explicit(
         detail = (await client.get(f"/v1/hosts/{_HOST_ID}")).json()
     assert "harness_accounts" not in disconnected
     assert "harness_accounts" not in detail
+    assert disconnected["harness_accounts_supported"] is False
+    assert detail["harness_accounts_supported"] is False
     assert disconnected["harness_login_supported"] is False
     assert detail["harness_login_supported"] is False
+
+
+@pytest.mark.parametrize(
+    ("harness_install", "capabilities", "expects_probe"),
+    [
+        (True, [CAP_HARNESS_ACCOUNTS], True),
+        (lambda: True, [CAP_HARNESS_ACCOUNTS], True),
+        (False, [CAP_HARNESS_ACCOUNTS], False),
+        (lambda: False, [CAP_HARNESS_ACCOUNTS], False),
+        (True, [], False),
+    ],
+    ids=["on", "callable-on", "off", "callable-off", "old-host"],
+)
+async def test_connect_requests_accounts_only_when_enabled_and_supported(
+    db_uri: str,
+    harness_install: bool | Callable[[], bool],
+    capabilities: list[str],
+    expects_probe: bool,
+) -> None:
+    """Registration stays non-blocking and only enabled capable hosts are probed."""
+    app, registry, _host_store, _conversations = _build_host_api_app(
+        db_uri,
+        harness_install=harness_install,
+    )
+    comm = await _connect_host(app, registry, capabilities=capabilities)
+    conn = registry.get(_HOST_ID)
+    assert conn is not None
+    for _ in range(20):
+        if conn.pending_harness_account_probes:
+            break
+        await asyncio.sleep(0.01)
+
+    assert bool(conn.pending_harness_account_probes) is expects_probe
+    if expects_probe:
+        output = await comm.receive_output(timeout=1)
+        assert output["type"] == "websocket.send"
+        assert isinstance(decode_host_frame(output["text"]), HostProbeAccountsFrame)
 
 
 async def test_hosts_api_surfaces_gateway_inference(
@@ -935,6 +982,7 @@ def multi_user_app(
             conv_store,
             auth_provider=auth,
             permission_store=permission_store,
+            harness_install=True,
         ),
         prefix="/v1",
     )
@@ -1015,6 +1063,27 @@ async def test_get_host_403_wrong_owner(
         f"Expected 403 for wrong owner, got {resp.status_code}. "
         "Owner check on GET /v1/hosts/{{id}} is missing."
     )
+
+
+async def test_refresh_harness_accounts_requires_owner(
+    multi_user_app: tuple[FastAPI, HostRegistry, HostStore, SqlAlchemyConversationStore],
+) -> None:
+    """Account probing cannot be triggered on another user's machine."""
+    app, registry, host_store, _conversations = multi_user_app
+    host_id = "294391bc835cde1130ef2a02dcd2b7b3"
+    host_store.upsert_on_connect(host_id, "alice-laptop", "alice@test.com")
+    _register_fake_host(registry, host_id, "alice@test.com")
+    conn = registry.get(host_id)
+    assert conn is not None
+    conn.hello.capabilities = [CAP_HARNESS_ACCOUNTS]
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"/v1/hosts/{host_id}/harnesses/accounts/refresh",
+            headers={"x-test-user": "bob@test.com"},
+        )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize("user,status", [(None, 401), ("bob@test.com", 403)])

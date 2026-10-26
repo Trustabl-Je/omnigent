@@ -23,7 +23,13 @@ import { cn } from "@/lib/utils";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { ComposerAgentIcon } from "@/shell/NewChatDialog";
-import { useHarnessStartup, useHosts, type HarnessAccount, type Host } from "@/hooks/useHosts";
+import {
+  useHarnessStartup,
+  useHosts,
+  useRefreshHarnessAccounts,
+  type HarnessAccount,
+  type Host,
+} from "@/hooks/useHosts";
 import { ApiError } from "@/lib/sessionsApi";
 import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
@@ -136,6 +142,10 @@ export const SettingsHarnessesSection = () => {
   );
   const selectedHost =
     onlineHosts.find((h) => h.host_id === selectedHostId) ?? onlineHosts[0] ?? null;
+  useRefreshHarnessAccounts(
+    selectedHost?.host_id ?? null,
+    canSetup && selectedHost?.harness_accounts_supported === true,
+  );
 
   // Capture the selected host when the fix opens so a later host change cannot
   // redirect an in-progress install or credential write to another machine.
