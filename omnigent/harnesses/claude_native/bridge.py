@@ -4418,6 +4418,7 @@ def _paste_and_submit(
             "-t",
             tmux_target,
         )
+        delivery_diagnostics.record_details(paste_sent=True)
     finally:
         with contextlib.suppress(OSError):
             os.unlink(paste_path)
@@ -4454,6 +4455,7 @@ def _paste_and_submit(
         polls=polls,
         empty_captures=empty_captures,
     )
+    delivery_diagnostics.record_submit_composer(pane=pane, box_reader=_composer_box, baseline=True)
     time.sleep(_PASTE_SETTLE_S)
     delivery_diagnostics.set_stage("checking_pending_prompt")
     if has_pending_user_prompt(bridge_dir):
@@ -4554,6 +4556,7 @@ def _verify_submit_accepted(
         time.sleep(_CLAUDE_READY_POLL_INTERVAL_S)
         pane = _capture_pane(socket_path, tmux_target)
         polls += 1
+        delivery_diagnostics.record_submit_composer(pane=pane, box_reader=_composer_box)
         if (
             bridge_dir is not None
             and submit_boundary is not None
@@ -5902,13 +5905,18 @@ def _raise_if_user_prompt_pending(
         :class:`ClaudeUserPromptPending`).
     """
     if _auto_mode_billing_prompt_matches(pane, _AUTO_MODE_BILLING_CONSENT):
+        delivery_diagnostics.record_pending_prompt("billing_consent")
         raise ClaudeUserPromptPending(
             "Claude Code is waiting for your auto-mode classifier billing choice. "
             "The message was not delivered. Open the terminal, answer the prompt, "
             "then resend your message.",
             nothing_typed=nothing_typed,
         )
-    if (bridge_dir is not None and _has_approval_wait(bridge_dir)) or _user_prompt_visible(pane):
+    if bridge_dir is not None and _has_approval_wait(bridge_dir):
+        delivery_diagnostics.record_pending_prompt("hook_wait")
+        raise ClaudeUserPromptPending(message, nothing_typed=nothing_typed)
+    if _user_prompt_visible(pane):
+        delivery_diagnostics.record_pending_prompt("visible_prompt")
         raise ClaudeUserPromptPending(message, nothing_typed=nothing_typed)
 
 
@@ -5919,6 +5927,7 @@ def has_pending_user_prompt(bridge_dir: Path) -> bool:
     :returns: Whether a question or permission request needs an explicit answer.
     """
     if _has_approval_wait(bridge_dir):
+        delivery_diagnostics.record_pending_prompt("hook_wait")
         return True
     info = _read_json_file(bridge_dir / _TMUX_FILE)
     if not isinstance(info, dict):
@@ -5926,7 +5935,10 @@ def has_pending_user_prompt(bridge_dir: Path) -> bool:
     socket_path, target = info.get("socket_path"), info.get("tmux_target")
     if not isinstance(socket_path, str) or not isinstance(target, str):
         return False
-    return _user_prompt_visible(_capture_pane(socket_path, target))
+    pending = _user_prompt_visible(_capture_pane(socket_path, target))
+    if pending:
+        delivery_diagnostics.record_pending_prompt("visible_prompt")
+    return pending
 
 
 def auto_mode_billing_notice_visible(pane: str) -> bool:
@@ -6102,6 +6114,7 @@ def _restore_occupied_input(
             _acknowledge_auto_mode_billing_notice(socket_path, tmux_target)
             return None
         surface = _occupying_surface(pane)
+        delivery_diagnostics.record_restore_observation(pane=pane, surface=surface)
         if surface is None:
             return None
         now = time.monotonic()
@@ -6133,16 +6146,19 @@ def _restore_occupied_input(
             # Deleting lines shrinks the box until its glyph row is back on
             # screen; the keys only edit the draft, so they need no spacing.
             _logger.info("claude-native: clearing a draft taller than the terminal")
+            delivery_diagnostics.record_restore_action("scrolled_draft_clear")
             _send_composer_clear_keys(socket_path, tmux_target, rows=len(pane.splitlines()))
         elif last_escape is None or now - last_escape >= _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S:
             if surface == _SHELL_MODE_SURFACE and _shell_mode_draft(pane):
                 # Escape keeps a typed shell command in shell mode, so the
                 # command is cleared instead, as a chat draft is before a paste.
                 _logger.info("claude-native: clearing a shell-mode draft from the input box")
+                delivery_diagnostics.record_restore_action("shell_clear")
                 for _ in range(2):
                     _run_tmux(socket_path, "send-keys", "-l", "-t", tmux_target, _CLEAR_LINE_KEY)
             else:
                 _logger.info("claude-native: dismissing %s covering the input box", surface)
+                delivery_diagnostics.record_restore_action("escape")
                 _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
             last_escape = now
         unclearable_seen = unclearable
