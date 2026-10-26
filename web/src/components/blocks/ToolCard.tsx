@@ -1,9 +1,9 @@
-// Tool-call renderer. Renders each call as a single muted-text trigger
-// line (status icon + truncated `name(argsSummary)`); clicking expands an
-// indented panel with the parameters JSON and output preview. The big
-// border-stripe / badge / pill card shell was removed deliberately — tool
-// calls used to dominate the transcript, and the goal is for the
-// assistant's prose to read first.
+// Tool-call renderer: a muted trigger line (status icon, title, one-line
+// result) that expands to the input and result as labeled fields, with raw
+// JSON one toggle away. The big border-stripe / badge / pill card shell was
+// removed deliberately: tool calls used to dominate the transcript, and the
+// goal is for the assistant's prose to read first. Tool-specific rendering
+// plugs in through `toolViews.ts`.
 
 import {
   CheckIcon,
@@ -30,6 +30,7 @@ import {
 } from "@/components/ai-elements/code-block";
 import { useResolvedThemeMode } from "@/components/theme/useResolvedThemeMode";
 import { useTerminalIsDark } from "@/components/theme/useTerminalIsDark";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -40,6 +41,11 @@ import { type ShellOutputFormat, parseShellToolOutput } from "@/lib/shellToolOut
 import { terminalSurfaceStyle } from "@/lib/terminalPalette";
 import { iconForTool } from "@/lib/toolIcon";
 import {
+  type ToolCall,
+  type ToolResultSummary,
+  summarizeToolResult,
+} from "@/lib/toolResultSummary";
+import {
   type ToolRunCall,
   type ToolTitle,
   formatToolRunLabel,
@@ -48,11 +54,16 @@ import {
   shellToolCall,
   splitEnvPrefix,
 } from "@/lib/toolTitle";
+import { parseToolOutput, toolErrorMessage } from "@/lib/toolValue";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
+import { ToolValueView } from "./ToolValueView";
+import { type ToolBodyProps, toolViewFor } from "./toolViews";
 
 const OUTPUT_PREVIEW_LINE_LIMIT = 80;
 const OUTPUT_PREVIEW_CHAR_LIMIT = 12_000;
+// Longer single-line results go in a wrapping code panel instead of prose.
+const INLINE_RESULT_MAX_CHARS = 500;
 
 /**
  * If the string is valid JSON, return its 2-space-indented form.
@@ -162,9 +173,7 @@ interface ToolCardProps {
    * (e.g. "web_search_call"). Used to pick the category icon.
    */
   nativeToolType?: string;
-  /** Brief one-line summary of arguments shown next to the name. */
-  argsSummary?: string;
-  /** Full args dict, rendered as JSON in the expanded panel. */
+  /** Full args dict, rendered as fields in the expanded panel. */
   arguments: Record<string, unknown>;
   /** Tool output, or null if not yet available / never produced. */
   output: string | null;
@@ -178,19 +187,24 @@ interface ToolCardProps {
 export function ToolCard({
   name,
   nativeToolType,
-  argsSummary,
   arguments: args,
   output,
   state,
   startedAt,
   duration,
 }: ToolCardProps) {
-  const title = useMemo(() => formatToolTitle(name, args, argsSummary), [name, args, argsSummary]);
-  const shellCall = useMemo(() => shellToolCall(name, args), [name, args]);
-  const inputJson = useMemo(() => JSON.stringify(args, null, 2), [args]);
-  const formattedOutput = useMemo(
-    () => (output === null ? null : prettyPrintIfJson(output)),
-    [output],
+  const view = toolViewFor(name);
+  const call = useMemo<ToolCall>(
+    () => ({ name, args, output, state }),
+    [name, args, output, state],
+  );
+  const title = useMemo(
+    () => view?.title?.(args) ?? formatToolTitle(name, args),
+    [view, name, args],
+  );
+  const summary = useMemo(
+    () => (view?.summary === undefined ? summarizeToolResult(call) : view.summary(call)),
+    [view, call],
   );
   const elapsedDuration = useElapsedDuration(state === "input-available" ? startedAt : null);
   const displayDuration = duration ?? elapsedDuration;
@@ -203,48 +217,186 @@ export function ToolCard({
       ? null
       : (resolveChatFilePath(title.filePath, root, home)?.path ?? null);
   const onBodyClick = openFile && linkPath ? () => openFile(linkPath) : undefined;
+  const Body = view?.Body ?? DefaultToolBody;
 
   return (
     <Collapsible defaultOpen={false} className="group not-prose w-full">
       <ToolTriggerRow
         title={title}
+        displayPath={linkPath}
         name={name}
         nativeToolType={nativeToolType}
         state={state}
         duration={displayDuration}
+        summary={summary}
         onBodyClick={onBodyClick}
       />
       <CollapsibleContent className="mt-1 ml-2 space-y-2 border-l pl-3 py-1 data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:animate-out data-[state=open]:animate-in">
-        {shellCall !== null ? (
-          <ShellTerminalPanel
-            command={shellCall.command}
-            outputFormat={shellCall.outputFormat}
-            argsCwd={typeof args.cwd === "string" && args.cwd.length > 0 ? args.cwd : null}
-            inputJson={inputJson}
-            output={output}
-            state={state}
+        <Body call={call} duration={displayDuration} />
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/** Expanded content for tools without a registered view: shell or generic. */
+function DefaultToolBody({ call, duration }: ToolBodyProps) {
+  const shellCall = useMemo(() => shellToolCall(call.name, call.args), [call.name, call.args]);
+  if (shellCall === null) return <GenericToolBody call={call} duration={duration} />;
+  const { cwd } = call.args;
+  return (
+    <ShellTerminalPanel
+      command={shellCall.command}
+      outputFormat={shellCall.outputFormat}
+      argsCwd={typeof cwd === "string" && cwd.length > 0 ? cwd : null}
+      args={call.args}
+      output={call.output}
+      state={call.state}
+    />
+  );
+}
+
+/**
+ * The input and result as labeled fields, with the exact JSON payloads one
+ * Raw toggle away. The toggle keeps its place so it keeps keyboard focus.
+ */
+function GenericToolBody({ call, duration }: ToolBodyProps) {
+  const { args, output, state } = call;
+  const [showRaw, setShowRaw] = useState(false);
+  const inputJson = useMemo(() => JSON.stringify(args, null, 2), [args]);
+  const hasInput = Object.keys(args).length > 0;
+  // A completed call with no output (provider-native tools) has no result to show.
+  const hasResult = output !== null || state !== "output-available";
+  const result = <ToolResultView output={output} state={state} duration={duration} />;
+  if (!hasInput && output === null) return result;
+  return (
+    <>
+      <section className="space-y-1">
+        <div className="flex min-h-6 items-center gap-2">
+          {!showRaw && <ToolSectionLabel>{hasInput ? "Input" : "Result"}</ToolSectionLabel>}
+          <RawToggleButton
+            className="ml-auto"
+            pressed={showRaw}
+            onToggle={() => setShowRaw((value) => !value)}
           />
-        ) : (
-          <>
+        </div>
+        {showRaw ? (
+          <div className="space-y-2">
             <CodePanel
               title="Parameters"
               text={inputJson}
               copyText={inputJson}
               copyLabel="Copy parameters"
             />
-            {formattedOutput !== null && <OutputSection output={formattedOutput} />}
-            {formattedOutput === null && state === "input-available" && (
-              <ToolPendingOutput duration={displayDuration} />
-            )}
-          </>
+            {output === null ? result : <OutputSection output={prettyPrintIfJson(output)} />}
+          </div>
+        ) : hasInput ? (
+          <ToolValueView value={args} />
+        ) : (
+          result
         )}
-        {shellCall === null &&
-          output === null &&
-          (state === "output-error" || state === "cancelled" || state === "no-output") && (
-            <EmptyOutputState state={state} />
-          )}
-      </CollapsibleContent>
-    </Collapsible>
+      </section>
+      {!showRaw && hasInput && hasResult && (
+        <section className="space-y-1">
+          <ToolSectionLabel>Result</ToolSectionLabel>
+          {result}
+        </section>
+      )}
+    </>
+  );
+}
+
+function ToolSectionLabel({ children }: { children: ReactNode }) {
+  return <div className="font-medium text-muted-foreground text-xs">{children}</div>;
+}
+
+type ResultPresentation =
+  | { kind: "error"; message: string }
+  | { kind: "fields"; value: unknown }
+  | { kind: "inline"; text: string }
+  | { kind: "panel"; text: string; language: CodeLanguage };
+
+/**
+ * How to show a tool's output: a reported failure, labeled fields for JSON
+ * that fits without truncation, short text inline, and anything longer in
+ * the preview panel that can expand to the full output.
+ */
+function presentToolResult(output: string): ResultPresentation {
+  const parsed = parseToolOutput(output);
+  const error = toolErrorMessage(parsed);
+  if (error !== null) return { kind: "error", message: error };
+  if (parsed.kind === "json") {
+    const pretty = JSON.stringify(parsed.value, null, 2);
+    if (!getOutputPreview(pretty).isTruncated) return { kind: "fields", value: parsed.value };
+    return { kind: "panel", text: pretty, language: "json" };
+  }
+  const text = stripAnsi(parsed.text);
+  if (!text.includes("\n") && text.length <= INLINE_RESULT_MAX_CHARS) {
+    return { kind: "inline", text: text.trim() };
+  }
+  return { kind: "panel", text, language: "text" };
+}
+
+function ToolResultView({
+  output,
+  state,
+  duration,
+}: {
+  output: string | null;
+  state: ToolState;
+  duration: number | undefined;
+}) {
+  const presentation = useMemo(
+    () => (output === null ? null : presentToolResult(output)),
+    [output],
+  );
+  if (presentation === null) {
+    if (state === "input-available") return <ToolPendingOutput duration={duration} />;
+    if (state === "output-error" || state === "cancelled" || state === "no-output") {
+      return <EmptyOutputState state={state} />;
+    }
+    return null;
+  }
+  switch (presentation.kind) {
+    case "error":
+      return (
+        <div className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-sm">
+          {presentation.message}
+        </div>
+      );
+    case "fields":
+      return <ToolValueView value={presentation.value} />;
+    case "inline":
+      return presentation.text.length === 0 ? (
+        <p className="text-muted-foreground text-sm">No output</p>
+      ) : (
+        <p className="break-words text-sm">{presentation.text}</p>
+      );
+    case "panel":
+      return <OutputSection output={presentation.text} language={presentation.language} />;
+  }
+}
+
+function RawToggleButton({
+  pressed,
+  onToggle,
+  className,
+}: {
+  pressed: boolean;
+  onToggle: () => void;
+  className?: string;
+}) {
+  return (
+    <Button
+      aria-pressed={pressed}
+      className={cn("h-6 px-1.5 text-muted-foreground", pressed && "text-foreground", className)}
+      onClick={onToggle}
+      size="xs"
+      type="button"
+      variant="ghost"
+      componentId="diagnostics.tool.toggle_raw_parameters"
+    >
+      Raw
+    </Button>
   );
 }
 
@@ -275,7 +427,6 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
               <ToolCard
                 key={`tool:${item.execution.callId}`}
                 name={item.execution.name}
-                argsSummary={item.execution.argsSummary}
                 arguments={item.execution.arguments}
                 output={item.output}
                 state={item.state}
@@ -313,51 +464,97 @@ function toolRunCall(item: RenderItem): ToolRunCall {
 }
 
 /**
- * Single muted-text trigger line for a tool call. Status/category icon
- * at left, title (verb bold + dynamic body) in the middle truncated to
- * one line, optional duration on the right, chevron at the far right.
+ * Muted trigger for a tool call. Status/category icon at left, title (verb
+ * bold + dynamic body) truncated to one line, MCP server tag, optional
+ * duration, and chevron; the result summary sits on a second line.
  */
 function ToolTriggerRow({
   title,
+  displayPath,
   name,
   nativeToolType,
   state,
   duration,
+  summary,
   onBodyClick,
 }: {
   title: ToolTitle;
+  /** The file path as the FileViewer resolves it (workspace-relative when inside). */
+  displayPath: string | null;
   name: string;
   nativeToolType: string | undefined;
   state: ToolState;
   duration: number | undefined;
+  summary: ToolResultSummary | null;
   /** When set, the body text (e.g. file path) is rendered as a clickable link. */
   onBodyClick?: () => void;
 }) {
-  const tooltip =
+  const label =
     title.verb && title.body ? `${title.verb} ${title.body}` : (title.verb ?? title.body);
+  const tooltip = title.toolName === undefined ? label : `${label} (${title.toolName})`;
   return (
     <CollapsibleTrigger
       title={tooltip}
-      className="flex w-full cursor-pointer items-center gap-1.5 py-0.5 text-left text-muted-foreground text-chat transition-colors hover:text-foreground"
+      className="block w-full cursor-pointer py-0.5 text-left text-muted-foreground text-chat transition-colors hover:text-foreground"
     >
-      <StatusIcon name={name} nativeToolType={nativeToolType} state={state} />
-      <span className="min-w-0 flex-1 truncate">
-        {title.verb !== null && <span className="font-semibold text-foreground">{title.verb}</span>}
-        {title.verb !== null && title.body.length > 0 && " "}
-        <ToolTitleBody title={title} onBodyClick={onBodyClick} />
+      <span className="flex w-full items-center gap-1.5">
+        <StatusIcon name={name} nativeToolType={nativeToolType} state={state} />
+        <span className="min-w-0 flex-1 truncate">
+          {title.verb !== null && (
+            <span className="font-semibold text-foreground">{title.verb}</span>
+          )}
+          {title.verb !== null && title.body.length > 0 && " "}
+          <ToolTitleBody title={title} displayPath={displayPath} onBodyClick={onBodyClick} />
+        </span>
+        {title.server !== undefined && (
+          <Badge
+            variant="outline"
+            className="h-[1.15rem] shrink-0 rounded px-1 font-normal text-muted-foreground text-xs"
+          >
+            {title.server}
+          </Badge>
+        )}
+        {duration !== undefined && (
+          <span className="shrink-0 tabular-nums opacity-70">{formatToolDuration(duration)}</span>
+        )}
+        <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
       </span>
-      {duration !== undefined && (
-        <span className="shrink-0 tabular-nums opacity-70">{formatToolDuration(duration)}</span>
-      )}
-      <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-90" />
+      {summary !== null && <ToolResultLine summary={summary} />}
     </CollapsibleTrigger>
   );
 }
 
+/** The result summary under a trigger row, hooked to the row's icon like a tree branch. */
+function ToolResultLine({ summary }: { summary: ToolResultSummary }) {
+  return (
+    <span
+      data-testid="tool-result-line"
+      className={cn(
+        "mt-px flex min-w-0 items-start gap-1.5 pl-1.5 text-[0.92em]",
+        summary.isError && "text-destructive",
+      )}
+    >
+      <span
+        aria-hidden="true"
+        className="mt-[0.35em] h-[0.5em] w-2 shrink-0 rounded-bl-[3px] border-current border-b border-l opacity-40"
+      />
+      <span className="min-w-0 truncate">{summary.text}</span>
+    </span>
+  );
+}
+
 /** The dynamic part of a trigger row: a shell command, a linked file path, or plain text. */
-function ToolTitleBody({ title, onBodyClick }: { title: ToolTitle; onBodyClick?: () => void }) {
+function ToolTitleBody({
+  title,
+  displayPath,
+  onBodyClick,
+}: {
+  title: ToolTitle;
+  displayPath: string | null;
+  onBodyClick?: () => void;
+}) {
   if (title.isShellCommand === true) return <ShellCommandLine command={title.body} />;
-  if (!onBodyClick) return title.body;
+  if (!onBodyClick) return displayPath ?? title.body;
   return (
     // Use <span role="link"> instead of <button> to avoid nesting
     // interactive elements — CollapsibleTrigger already renders as
@@ -378,7 +575,7 @@ function ToolTitleBody({ title, onBodyClick }: { title: ToolTitle; onBodyClick?:
         }
       }}
     >
-      {title.body}
+      {displayPath ?? title.body}
     </span>
   );
 }
@@ -415,7 +612,7 @@ function ShellTerminalPanel({
   command,
   outputFormat,
   argsCwd,
-  inputJson,
+  args,
   output,
   state,
 }: {
@@ -423,12 +620,13 @@ function ShellTerminalPanel({
   outputFormat: ShellOutputFormat;
   /** Working directory from the call's arguments (Codex sends one). */
   argsCwd: string | null;
-  inputJson: string;
+  args: Record<string, unknown>;
   output: string | null;
   state: ToolState;
 }) {
   const [wrap, setWrap] = useState(true);
   const [showRaw, setShowRaw] = useState(false);
+  const inputJson = useMemo(() => JSON.stringify(args, null, 2), [args]);
   const terminalIsDark = useTerminalIsDark();
   const appIsDark = useResolvedThemeMode() === "dark";
   // The terminal theme setting can pin the scheme the app is not in; repaint
@@ -457,17 +655,7 @@ function ShellTerminalPanel({
       {hasOutput && (
         <CopyTextButton label="Copy output" caption="output" text={stripAnsi(parsed.text)} />
       )}
-      <Button
-        aria-pressed={showRaw}
-        className={cn("h-6 px-1.5 text-muted-foreground", showRaw && "text-foreground")}
-        onClick={() => setShowRaw((value) => !value)}
-        size="xs"
-        type="button"
-        variant="ghost"
-        componentId="diagnostics.tool.toggle_raw_parameters"
-      >
-        Raw
-      </Button>
+      <RawToggleButton pressed={showRaw} onToggle={() => setShowRaw((value) => !value)} />
     </CodeBlockActions>
   );
   return (

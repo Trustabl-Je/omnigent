@@ -538,8 +538,8 @@ describe("BlockRenderer dispatch", () => {
     // group — the most-recent tool renders (the collapsed group's content
     // is unmounted), while an older one stays folded. Guards against a
     // regression that folds everything.
-    expect(screen.getByText(/tool_5/)).toBeDefined();
-    expect(screen.queryByText(/tool_1/)).toBeNull();
+    expect(screen.getByText("Tool 5")).toBeDefined();
+    expect(screen.queryByText("Tool 1")).toBeNull();
   });
 
   describe("settled-turn process fold (Worked row)", () => {
@@ -591,7 +591,7 @@ describe("BlockRenderer dispatch", () => {
       expect(runTrigger).toHaveClass("text-chat");
       expect(runTrigger).not.toHaveClass("text-sm");
       fireEvent.click(runTrigger!);
-      const individualToolTrigger = screen.getByText(/tool_3/).closest("button");
+      const individualToolTrigger = screen.getByText("Tool 3").closest("button");
       expect(individualToolTrigger).toHaveClass("text-chat");
       expect(individualToolTrigger).not.toHaveClass("text-sm");
       // The answer remains visible after expansion too.
@@ -1146,9 +1146,9 @@ describe("BlockRenderer dispatch", () => {
         </FileViewerContext.Provider>,
       );
       // The dispatch card and both assistant messages stay visible.
-      expect(screen.getByText(/sys_session_send/)).toBeDefined();
+      expect(screen.getByText("Start child session:")).toBeDefined();
       expect(screen.getByText("Dispatching.")).toBeDefined();
-      expect(screen.queryByText(/tool_1/)).toBeNull();
+      expect(screen.queryByText("Tool 1")).toBeNull();
       expect(screen.getByText("Relayed.")).toBeDefined();
     });
 
@@ -1196,7 +1196,7 @@ describe("BlockRenderer dispatch", () => {
       expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
       expect(screen.getByText("Skill")).toBeDefined();
       expect(screen.getByText("dev-productivity:simplify")).toBeDefined();
-      expect(screen.queryByText(/tool_1/)).toBeNull();
+      expect(screen.queryByText("Tool 1")).toBeNull();
       expect(screen.getByText("Acknowledged.")).toBeDefined();
     });
 
@@ -1312,7 +1312,7 @@ describe("BlockRenderer dispatch", () => {
       expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
       expect(screen.getByText("Edit landed.")).toBeDefined();
       expect(screen.getByText("Editing the file.")).toBeDefined();
-      expect(screen.queryByText(/turn_diff/)).toBeNull();
+      expect(screen.queryByText("Turn diff")).toBeNull();
 
       // Expanding the Worked row reveals the trace; the diff sits in
       // the (still-collapsed) tool-run group alongside the shell call.
@@ -1320,7 +1320,7 @@ describe("BlockRenderer dispatch", () => {
       expect(screen.getByText("Editing the file.")).toBeDefined();
       const runLabel = screen.getByText("Ran 1 shell command, called 1 other tool");
       fireEvent.click(runLabel);
-      expect(screen.getByText(/turn_diff/)).toBeDefined();
+      expect(screen.getByText("Turn diff")).toBeDefined();
     });
 
     it("keeps narration visible when a continued turn yields to sub-agents", () => {

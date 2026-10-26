@@ -799,7 +799,7 @@ function renderItem(
       );
     case "tool":
       // Intelligent routing's fan-out sizing gets a structured plan card
-      // instead of the generic name(json) row + raw-JSON expansion.
+      // instead of the generic tool row.
       if (ADVISE_MODELS_NAMES.has(item.execution.name)) {
         return (
           <SmartRoutingCard
@@ -814,7 +814,6 @@ function renderItem(
         <ToolCard
           key={key}
           name={item.execution.name}
-          argsSummary={item.execution.argsSummary}
           arguments={item.execution.arguments}
           output={item.output}
           state={item.state}
