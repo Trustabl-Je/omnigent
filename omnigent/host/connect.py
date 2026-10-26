@@ -223,6 +223,27 @@ _logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+def _print_runner_lifecycle(
+    message: str, *, runner_id: str, session_id: str | None = None
+) -> None:
+    """A detached console must not prevent an already-completed runner acknowledgement."""
+    try:
+        print(message, flush=True)
+    except (BrokenPipeError, ValueError) as exc:
+        # A log handler may share the detached console.
+        with contextlib.suppress(OSError, ValueError):
+            _logger.warning(
+                "Host console output is unavailable",
+                extra=debug_event(
+                    "host_console_write_failed",
+                    runner_id=runner_id,
+                    session_id=session_id,
+                    exception_type=type(exc).__name__,
+                    stream="stdout",
+                ),
+            )
+
+
 def _coerce_int(value: object) -> int:
     """Convert a validated JSON scalar with the standard ``int`` semantics."""
     return int(cast(str | bytes | bytearray | SupportsInt | SupportsIndex, value))
@@ -2122,11 +2143,12 @@ class HostProcess:
         # host's own terminal shows lifecycle lines, but the runner's real
         # output — the agent turn, tracebacks — lands only in this file.
         session_line = f"\n    session: {frame.session_id}" if frame.session_id else ""
-        print(
+        _print_runner_lifecycle(
             f"  ↑ Runner started: {runner_id} (pid={proc.pid})\n"
             f"    log: {display_log_path(log_path)}"
             f"{session_line}",
-            flush=True,
+            runner_id=runner_id,
+            session_id=frame.session_id,
         )
         return HostLaunchRunnerResultFrame(
             request_id=frame.request_id,
@@ -2321,9 +2343,10 @@ class HostProcess:
         # freeze the daemon's control handler.
         await self._stop_runner_and_trigger(handle.proc, "runner_stopped")
         _logger.info("Stopped runner %s", frame.runner_id)
-        print(
+        _print_runner_lifecycle(
             f"  ↓ Runner stopped: {frame.runner_id}",
-            flush=True,
+            runner_id=frame.runner_id,
+            session_id=handle.session_id,
         )
         return HostStopRunnerResultFrame(
             request_id=frame.request_id,

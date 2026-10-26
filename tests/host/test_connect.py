@@ -1312,10 +1312,22 @@ async def test_handle_launch_without_harness_skips_check(
     _cleanup_host(host)
 
 
+@pytest.mark.parametrize(
+    ("console_error", "log_sink_closed"),
+    [
+        (None, False),
+        (BrokenPipeError(), False),
+        (ValueError("closed"), False),
+        (BrokenPipeError(), True),
+    ],
+)
 async def test_handle_launch_prints_exact_runner_log_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    console_error: Exception | None,
+    log_sink_closed: bool,
 ) -> None:
     """The launch banner names the exact runner log file, not just the dir.
 
@@ -1353,21 +1365,39 @@ async def test_handle_launch_prints_exact_runner_log_path(
             stderr=subprocess.DEVNULL,
         )
 
-    with patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen):
-        result = await host._handle_launch(frame)
+    try:
+        with (
+            patch("omnigent.host.connect.subprocess.Popen", side_effect=_fake_popen),
+            patch("omnigent.host.connect.print", side_effect=console_error, create=True)
+            if console_error is not None
+            else contextlib.nullcontext(),
+            patch("omnigent.host.connect._logger.warning", side_effect=BrokenPipeError())
+            if log_sink_closed
+            else contextlib.nullcontext(),
+        ):
+            result = await host._handle_launch(frame)
+    finally:
+        _cleanup_host(host)
 
     assert result.status == "launched", result.error
     # Exactly one runner-*.log was created under the runner log dir.
     runner_log_dir = tmp_path / ".omnigent" / "logs" / "runner"
     log_files = list(runner_log_dir.glob("runner-*.log"))
     assert len(log_files) == 1
-    out = capsys.readouterr().out
-    assert "↑ Runner started:" in out
-    # The exact file path is printed, home-collapsed to ``~`` for readability.
-    assert f"log: ~/.omnigent/logs/runner/{log_files[0].name}" in out
-    assert "session: conv_log" in out
-
-    _cleanup_host(host)
+    if console_error is None:
+        out = capsys.readouterr().out
+        assert "↑ Runner started:" in out
+        assert f"log: ~/.omnigent/logs/runner/{log_files[0].name}" in out
+        assert "session: conv_log" in out
+    elif not log_sink_closed:
+        [record] = [
+            row
+            for row in caplog.records
+            if getattr(row, "event_name", None) == "host_console_write_failed"
+        ]
+        assert record.attributes["exception_type"] == type(console_error).__name__
+        assert record.session_id == "conv_log"
+        assert record.attributes["runner_id"] == token_bound_runner_id("tok_log")
 
 
 class _FakeTunnel:
@@ -1915,9 +1945,11 @@ def test_runner_exit_error_redacts_credential_values(tmp_path: Path) -> None:
     assert "code 3" in error
 
 
+@pytest.mark.parametrize("console_closed", [False, True])
 async def test_watch_runner_silent_on_intentional_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    console_closed: bool,
 ) -> None:
     """A host.stop_runner termination is NOT reported as a crash.
 
@@ -1962,9 +1994,14 @@ async def test_watch_runner_silent_on_intentional_stop(
     assert result.status == "launched", result.error
 
     runner_id = token_bound_runner_id("tok_stop")
-    stop_result = await host._handle_stop(
-        HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
-    )
+    with (
+        patch("omnigent.host.connect.print", side_effect=BrokenPipeError(), create=True)
+        if console_closed
+        else contextlib.nullcontext()
+    ):
+        stop_result = await host._handle_stop(
+            HostStopRunnerFrame(request_id="req_stop_2", runner_id=runner_id)
+        )
     assert stop_result.status == "stopped"
 
     # Let the watcher observe the (intentional) death and finish.
