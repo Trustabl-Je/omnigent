@@ -183,6 +183,7 @@ def _run_json_command(
     try:
         process = subprocess.Popen(
             argv,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

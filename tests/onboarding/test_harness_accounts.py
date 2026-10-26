@@ -152,6 +152,35 @@ else:
     }
 
 
+def test_json_account_probes_do_not_inherit_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Process:
+        pid = None
+        returncode = 0
+
+        def communicate(self, *, timeout: float) -> tuple[str, str]:
+            del timeout
+            return "{}", ""
+
+    def _popen(argv: list[str], **kwargs: object) -> _Process:
+        assert argv == ["probe", "--json"]
+        captured.update(kwargs)
+        return _Process()
+
+    monkeypatch.setattr(harness_accounts.subprocess, "Popen", _popen)
+
+    return_code, payload = harness_accounts._run_json_command(
+        ["probe", "--json"],
+        deadline=time.monotonic() + 1,
+        cancel_event=None,
+    )
+
+    assert return_code == 0
+    assert payload == {}
+    assert captured["stdin"] is harness_accounts.subprocess.DEVNULL
+
+
 def test_cancelled_claude_probe_kills_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

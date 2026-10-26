@@ -4392,16 +4392,15 @@ class HostProcess:
             return
         generation = self._capability_generation
         try:
-            configured, accounts, gateway = await asyncio.wait_for(
+            configured, gateway = await asyncio.wait_for(
                 asyncio.gather(
                     self._probe_configured_harnesses(startup=True),
-                    self._probe_harness_accounts(explicit_refresh=False),
                     self._probe_gateway_inference(startup=True),
                 ),
                 timeout=_HOST_CAPABILITY_INIT_TIMEOUT_S,
             )
         except TimeoutError:
-            configured = accounts = gateway = None
+            configured = gateway = None
             _logger.error(
                 "Host capability discovery exceeded %.0fs; continuing with unknown metadata",
                 _HOST_CAPABILITY_INIT_TIMEOUT_S,
@@ -4412,7 +4411,7 @@ class HostProcess:
                 flush=True,
             )
         if self._capability_generation == generation:
-            self._replace_capabilities(configured, gateway, accounts)
+            self._replace_capabilities(configured, gateway)
         self._capabilities_initialized = True
 
     def _replace_capabilities(
@@ -5323,7 +5322,6 @@ class HostProcess:
     ) -> None:
         """Publish informational account metadata after connect and every five minutes."""
         while True:
-            await asyncio.sleep(HARNESS_ACCOUNTS_REFRESH_INTERVAL_S)
             accounts = await self._probe_harness_accounts(explicit_refresh=False)
             if accounts is not None and accounts != self._harness_accounts:
                 self._replace_capabilities(None, None, accounts)
@@ -5339,6 +5337,7 @@ class HostProcess:
                             )
                         ),
                     )
+            await asyncio.sleep(HARNESS_ACCOUNTS_REFRESH_INTERVAL_S)
 
     def _raise_connection_error(self, frame: HostConnectionErrorFrame) -> None:
         """Raise the lifecycle exception requested by a server error frame."""

@@ -2631,55 +2631,6 @@ async def test_cancelled_account_probe_does_not_block_event_loop_shutdown(
     assert errors == []
 
 
-async def test_host_waits_for_initial_account_probe_before_listening(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The listening banner cannot race a CLI probe that temporarily owns the TTY."""
-    host = _make_host_process()
-    probe_started = asyncio.Event()
-    probe_release = asyncio.Event()
-    listening = asyncio.Event()
-
-    async def _accounts(*, explicit_refresh: bool) -> dict[str, object]:
-        assert explicit_refresh is False
-        probe_started.set()
-        await probe_release.wait()
-        return {}
-
-    original_print = print
-
-    def _print(*args: object, **kwargs: object) -> None:
-        if "Listening for sessions" in " ".join(str(arg) for arg in args):
-            listening.set()
-        original_print(*args, **kwargs)
-
-    monkeypatch.setattr(host, "_probe_harness_accounts", _accounts)
-    monkeypatch.setattr(
-        host,
-        "_probe_configured_harnesses",
-        lambda *, startup: asyncio.sleep(0, result={"claude-native": True}),
-    )
-    monkeypatch.setattr(
-        host,
-        "_probe_gateway_inference",
-        lambda *, startup: asyncio.sleep(0, result={"claude-native": False}),
-    )
-    monkeypatch.setattr(host, "_ensure_model_options_prewarm", lambda: None)
-    monkeypatch.setattr("builtins.print", _print)
-    tunnel = _BlockingTunnel()
-    serve_task = asyncio.create_task(host._serve_frames(tunnel))  # type: ignore[arg-type]
-    try:
-        await asyncio.wait_for(probe_started.wait(), timeout=1)
-        assert tunnel.sent == []
-        assert not listening.is_set()
-
-        probe_release.set()
-        await asyncio.wait_for(tunnel.first_send.wait(), timeout=1)
-        await asyncio.wait_for(listening.wait(), timeout=1)
-    finally:
-        await _cancel(serve_task)
-
-
 async def test_owner_lookup_overlaps_capability_discovery_after_websocket_upgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2798,7 +2749,7 @@ async def test_incomplete_startup_capabilities_preserve_registration_fallback(
     monkeypatch.setattr(
         host,
         "_probe_harness_accounts",
-        lambda *, explicit_refresh: asyncio.sleep(0, result=None),
+        lambda *, startup: asyncio.sleep(0, result=None),
     )
     tunnel = _FakeTunnel()
 
@@ -2834,7 +2785,7 @@ async def test_incomplete_startup_discovery_is_reused_across_reconnects(
     monkeypatch.setattr(
         host,
         "_probe_harness_accounts",
-        lambda *, explicit_refresh: asyncio.sleep(0, result=None),
+        lambda *, startup: asyncio.sleep(0, result=None),
     )
     monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
     first = _FakeTunnel()
@@ -2909,8 +2860,8 @@ async def test_startup_discovery_cannot_publish_after_newer_capability_result(
         await discovery_release.wait()
         return {"codex-native": False}
 
-    async def _stale_accounts(*, explicit_refresh: bool) -> dict[str, object]:
-        assert explicit_refresh is False
+    async def _stale_accounts(*, startup: bool) -> dict[str, object]:
+        assert startup is True
         await discovery_release.wait()
         return {}
 
@@ -2973,11 +2924,6 @@ async def test_capability_result_publishes_without_full_refresh(
 
     monkeypatch.setattr(host, "_probe_configured_harnesses", _configured)
     monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
-    monkeypatch.setattr(
-        host,
-        "_probe_harness_accounts",
-        lambda *, explicit_refresh: asyncio.sleep(0, result=None),
-    )
     monkeypatch.setattr(
         "omnigent.host.connect._unavailable_harness_became_ready", lambda configured: False
     )
@@ -5142,7 +5088,7 @@ async def test_dispatch_refresh_harnesses_uses_guard_and_updates_capabilities(
     assert host._gateway_inference == {"codex-native": False}
 
 
-async def test_startup_capability_discovery_includes_accounts(
+async def test_startup_capability_discovery_does_not_probe_accounts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     host = _make_host_process()
@@ -5154,8 +5100,7 @@ async def test_startup_capability_discovery_includes_accounts(
         return {"codex": False}
 
     async def _accounts(*, explicit_refresh: bool) -> dict[str, object]:
-        assert explicit_refresh is False
-        return {"codex": {"kind": "none"}}
+        raise AssertionError("account probes must not run during startup discovery")
 
     monkeypatch.setattr(host, "_probe_configured_harnesses", _configured)
     monkeypatch.setattr(host, "_probe_gateway_inference", _gateway)
@@ -5164,7 +5109,7 @@ async def test_startup_capability_discovery_includes_accounts(
     await host._initialize_capabilities()
 
     assert host._configured_harnesses == {"codex": True}
-    assert host._harness_accounts == {"codex": {"kind": "none"}}
+    assert host._harness_accounts is None
 
 
 async def test_dispatch_codex_login_start_and_cancel(
