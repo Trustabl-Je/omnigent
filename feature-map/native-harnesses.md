@@ -30,7 +30,8 @@ implements them separately, so a fix for one harness does not reach the others.
 - `resume`: resume a previous conversation from the CLI (`--resume`, or a bare
   `--resume` picker that lists only this host's sessions) or by reopening it.
 - `pi-rebuilt-tool-names`: Pi forks and cold resumes keep matching tool names
-  when rebuilding tool results, as required by Gemini.
+  when rebuilding tool results, as required by Gemini. Unmatched outputs become
+  labeled recovery text so missing calls do not block continuation.
 - `steer`: sending while the harness is mid-turn steers the active turn.
 - `chat-render`: the harness's output renders in chat like other harnesses.
   A single-file tool row (Read, Write, Edit) shows its path as a dotted link;
@@ -800,16 +801,50 @@ Cross-harness journeys:
   derived skill/MCP plugin listing still works; a 502 shows an inventory error.
   Codex and Cursor keep their existing derived listings.
 
+**Pi persisted history:** for `chat-render` and `tool-history`, complete a
+prompt and tool turn, then reload Chat: each persisted item appears once.
+Stall a history POST and confirm policy ALLOW/DENY still runs. A result must
+wait for its call to be accepted. Retries retain item IDs; repeated tool/message
+callbacks coalesce, while a repeated input callback is a separate prompt.
+For a Pi child, stall final-answer delivery: idle may update, but the parent
+must receive no completion until the answer is saved. Exhaust delivery and
+expect a failed result instead of an old answer. A later prompt must not extend
+the previous history wait; an obsolete outcome must not retry into a newer loop.
+If a follow-up is queued before delivery finishes, the parent must wait for
+that continued work and receive its final answer.
+Interrupt a running tool and expect cancellation. Compaction must leave the
+runner idle without completing the parent's task. Queue bounds, retry budgets and shutdown
+limits live in `createHistoryQueue`; delivery is memory-only. Older servers
+may omit the status-only observation and lack `source_id` deduplication.
+`tests/harnesses/pi_native/test_pi_native_extension.py` covers extension behavior;
+`tests/server/routes/test_subagent_status.py` covers status-only forwarding;
+`tests/server/routes/test_native_failure_output.py` covers result selection;
+`tests/runner/test_native_subagent_turn_outcome_delivery.py` covers runner idle
+and confirmed outcomes;
+`tests/server/integration/test_sessions_external_item_idempotency.py` covers
+persistence deduplication. These checks do not establish desktop rendering parity.
+
 **Pi rebuilt history:** converter pairing/name cases in
 `tests/harnesses/pi_native/test_pi_native_resume.py` cover matching, reordered
-and orphan results. The existing
+and duplicate results, plus missing calls and outputs arriving across user turns.
+Unmatched outputs retain their content as labeled, untrusted tool data without inventing a call;
+same-turn results retain their names and pairing. The existing
 `tests/e2e/test_pi_native_resume_duplicate_tool_result_e2e.py::test_cold_resume_does_not_replay_duplicate_tool_result`
-checks real server/runner serialization with a stub Pi process. For a real
-Google-provider check, fork a session containing tool calls onto native Pi
-with Gemini, then send a follow-up; repeat a cold resume after removing its
-local session file. Expect preserved results and a reply without the empty
-`function_response.name` error. Orphan results and thought signatures remain
-separate compatibility gaps; these automated checks do not prove live Gemini.
+checks real server/runner serialization with a stub Pi process.
+`tests/e2e/test_pi_native_fork_parallel_tool_results_e2e.py::test_pi_native_fork_rebuild_keeps_parallel_tool_results_adjacent`
+uses real Pi with scripted providers: an Anthropic tool turn forks onto Anthropic
+or OpenAI Responses with an unmatched stored output. The Responses case also
+stops Pi, removes its isolated local history file and cold-resumes. Both retain
+parallel results and recovery text, and the follow-up succeeds.
+
+For a manual check, fork an affected session onto a Responses model and send a
+follow-up; expect retained output without an orphan-call HTTP 400. Reload Chat
+and confirm the reply appears once; ask another question and confirm the copied
+tool values reach the model without executing the tools again. Repeat after
+stopping the isolated test terminal and removing its local session file. Existing
+local files are reused unchanged. For Gemini, fork tool-containing history and
+send a follow-up; expect no empty `function_response.name` error. These automated
+checks do not prove live providers, browser rendering or thought-signature parity.
 
 ## Gotchas
 
