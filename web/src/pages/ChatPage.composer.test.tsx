@@ -1038,7 +1038,7 @@ describe("Composer slash-command menu", () => {
 
   function renderClearComposer(
     harness: "claude-native" | "codex-native",
-    advertised: Partial<typeof FALLBACK_SERVER_INFO>,
+    advertised: Partial<typeof FALLBACK_SERVER_INFO> | "loading",
   ) {
     const { sessionHarness } = useChatStore.getState();
     onTestFinished(() => useChatStore.setState({ sessionHarness }));
@@ -1046,7 +1046,9 @@ describe("Composer slash-command menu", () => {
     const clearContext = vi.spyOn(useChatStore.getState(), "clearContext").mockResolvedValue();
     const props = composerProps({ isNativeWrapper: true });
     render(
-      <CapabilitiesProvider info={{ ...FALLBACK_SERVER_INFO, ...advertised }}>
+      <CapabilitiesProvider
+        info={advertised === "loading" ? "loading" : { ...FALLBACK_SERVER_INFO, ...advertised }}
+      >
         <Composer {...props} />
       </CapabilitiesProvider>,
     );
@@ -1068,17 +1070,15 @@ describe("Composer slash-command menu", () => {
     ["claude-native", {}],
     ["claude-native", { clear_event: false }],
     ["codex-native", {}],
-  ] as const)(
-    "%s sends a typed /clear as text when the server advertises %o",
-    (harness, advertised) => {
-      const { clearContext, onSend } = renderClearComposer(harness, advertised);
-      expect(screen.queryByTestId("slash-menu-item-clear")).toBeNull();
-      fireEvent.change(textarea(), { target: { value: "/clear" } });
-      fireEvent.keyDown(textarea(), { key: "Enter" });
-      expect(clearContext).not.toHaveBeenCalled();
-      expect(onSend).toHaveBeenCalledExactlyOnceWith("/clear", undefined);
-    },
-  );
+    ["claude-native", "loading"],
+  ] as const)("%s sends a typed /clear as text when server info is %o", (harness, advertised) => {
+    const { clearContext, onSend } = renderClearComposer(harness, advertised);
+    expect(screen.queryByTestId("slash-menu-item-clear")).toBeNull();
+    fireEvent.change(textarea(), { target: { value: "/clear" } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+    expect(clearContext).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledExactlyOnceWith("/clear", undefined);
+  });
 
   it("Tab completes a match found only mid-name (exercises menuMatches, not just the render filter)", () => {
     render(<Composer {...composerProps()} />);
