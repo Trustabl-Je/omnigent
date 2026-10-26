@@ -11085,6 +11085,7 @@ async def test_probe_claude_model_options_uses_harness_startup_config(
     )
 
     class _FakeProcess:
+        pid = None
         returncode = 0
 
         async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
@@ -11137,6 +11138,8 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     }
 
     class _Run:
+        pid = None
+
         def __init__(self, stdout: bytes, returncode: int = 0) -> None:
             self.returncode = returncode
             self._stdout = stdout
@@ -11209,6 +11212,7 @@ async def test_probe_claude_model_options_runs_the_harness_under_the_launch_env(
     captured: dict[str, Any] = {}
 
     class _FakeProcess:
+        pid = None
         returncode = 0
 
         async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:
@@ -11462,6 +11466,7 @@ async def test_probe_claude_model_options_returns_none_on_probe_failure(
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     class _FailedProcess:
+        pid = None
         returncode = 1
 
         async def communicate(self, input: bytes | None = None) -> tuple[bytes, bytes]:

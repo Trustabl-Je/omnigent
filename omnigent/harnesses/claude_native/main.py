@@ -123,8 +123,10 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
+from omnigent.inner import _proc
 from omnigent.inner._subprocess_lifecycle import (
     await_cleanup_task,
+    close_subprocess_transport,
     terminate_direct_subprocess,
 )
 from omnigent.models import model_catalog
@@ -1016,22 +1018,25 @@ async def _resolve_claude_model_alias(
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_proc.spawn_kwargs(),
         )
     except OSError:
         _logger.debug("Claude alias resolution could not launch for %r", alias, exc_info=True)
         return {}
+    _proc.remember_process_group(process)
     try:
         async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
             stdout, _stderr = await process.communicate()
     except (TimeoutError, asyncio.CancelledError) as exc:
-        if process.returncode is None:
-            process.kill()
+        _proc.kill_tree(process)
         with contextlib.suppress(Exception):
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
         if isinstance(exc, asyncio.CancelledError):
             raise
         _logger.debug("Claude alias resolution timed out for %r", alias)
         return {}
+    finally:
+        close_subprocess_transport(process)
     if process.returncode != 0:
         _logger.debug("Claude alias resolution exited %s for %r", process.returncode, alias)
         return {}
@@ -1187,22 +1192,25 @@ async def _run_claude_model_probe(
             stdin=asyncio.subprocess.PIPE if stream_input else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_proc.spawn_kwargs(),
         )
     except OSError:
         _logger.warning("Claude model probe could not launch the claude CLI", exc_info=True)
         return None
+    _proc.remember_process_group(process)
     try:
         async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
             stdout, stderr = await process.communicate(probe_input)
     except (TimeoutError, asyncio.CancelledError) as exc:
-        if process.returncode is None:
-            process.kill()
+        _proc.kill_tree(process)
         with contextlib.suppress(Exception):
-            await process.wait()
+            await asyncio.wait_for(process.wait(), timeout=1.0)
         if isinstance(exc, asyncio.CancelledError):
             raise
         _logger.warning("Claude model probe timed out")
         return None
+    finally:
+        close_subprocess_transport(process)
     text = stdout.decode(errors="replace")
     if process.returncode != 0:
         _logger.warning(

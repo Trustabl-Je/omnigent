@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import psutil
 import pytest
 
 from omnigent.harnesses.claude_native import main as claude_native
+from omnigent.inner import _proc
+from omnigent.models import model_catalog_store
+from tests._helpers.polling import poll_until_async
+from tests._helpers.providers import isolate_provider_resolution
 
 
 @pytest.mark.parametrize("helper", [None, "", "printf test-token"])
@@ -42,6 +51,157 @@ def test_model_probe_uses_configured_auth_helper(
         assert json.loads(args[args.index("--settings") + 1])["apiKeyHelper"] == helper
 
 
+@pytest.mark.posix_only
+@pytest.mark.parametrize("previous_bare_catalog", [False, True], ids=["empty-store", "bare-cache"])
+async def test_catalog_runs_wrapper_bootstrap_before_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, previous_bare_catalog: bool
+) -> None:
+    """A bootstrap wrapper initializes managed settings before any discovery subprocess."""
+    config_home = isolate_provider_resolution(monkeypatch, tmp_path / "config")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    for name in (
+        "OMNIGENT_CLAUDE_LAUNCHER",
+        "OMNIGENT_CLAUDE_PATH",
+        "HARNESS_CLAUDE_PATH",
+        "ANTHROPIC_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    managed_settings = tmp_path / "managed-settings.json"
+    monkeypatch.setattr(
+        "omnigent.onboarding.ambient.CLAUDE_CODE_MANAGED_SETTINGS_PATHS", (managed_settings,)
+    )
+    launches = tmp_path / "discovery.jsonl"
+    gateway_model = "system.ai.claude-opus-5-5[1m]"
+    settings = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "https://gateway.example/anthropic",
+            "CLAUDE_CODE_USE_GATEWAY": "1",
+            "ANTHROPIC_MODEL": gateway_model,
+        }
+    }
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(f"""\
+            import json, sys
+            from pathlib import Path
+            settings_path = Path({str(managed_settings)!r})
+            settings = json.loads(settings_path.read_text()) if settings_path.exists() else {{}}
+            model = settings.get("env", {{}}).get("ANTHROPIC_MODEL", "claude-opus-5-5")
+            with open({str(launches)!r}, "a") as output:
+                output.write(json.dumps({{"model": model, "args": sys.argv[1:]}}) + "\\n")
+            if "--input-format" in sys.argv:
+                sys.stdin.read()
+                print(json.dumps({{
+                    "type": "control_response",
+                    "response": {{"subtype": "success", "request_id": "model-catalog",
+                        "response": {{"models": [{{"value": "opus", "displayName": "Opus"}}]}}}},
+                }}))
+            print(json.dumps({{"type": "system", "subtype": "init", "model": model}}))
+            """)
+    )
+    fake_claude.chmod(0o755)
+    wrapper = tmp_path / "bootstrap-claude"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(f"""\
+            import os, sys
+            from pathlib import Path
+            assert sys.argv[1] == "--bootstrap"
+            Path({str(managed_settings)!r}).write_text({json.dumps(settings)!r})
+            os.execv({str(fake_claude)!r}, [{str(fake_claude)!r}, *sys.argv[2:]])
+            """)
+    )
+    wrapper.chmod(0o755)
+    if previous_bare_catalog:
+        # Legacy cache entries omit the configured wrapper.
+        legacy_fingerprint = model_catalog_store.fingerprint_of(
+            "claude-native",
+            "control-picker-v3",
+            None,
+            None,
+            None,
+            None,
+            model_catalog_store.binary_identity("claude"),
+            None,
+            (),
+        )
+        model_catalog_store.write_catalog(
+            "claude-native",
+            legacy_fingerprint,
+            [{"id": "opus", "model": "claude-opus-5-5", "isDefault": True}],
+        )
+    (config_home / "config.yaml").write_text(
+        json.dumps(
+            {
+                "harness": {
+                    "claude-native": {
+                        "command": str(wrapper),
+                        "args": ["--bootstrap"],
+                    }
+                }
+            }
+        )
+    )
+    fingerprint = claude_native.claude_catalog_fingerprint(None)
+    assert not managed_settings.exists()
+
+    rows = await claude_native.claude_launch_catalog(None)
+
+    assert rows is not None
+    assert [row["model"] for row in rows if row.get("isDefault")] == [gateway_model]
+    assert model_catalog_store.read_catalog("claude-native", fingerprint) == rows
+    observed = [json.loads(line) for line in launches.read_text().splitlines()]
+    assert len(observed) == 2
+    assert all(launch["model"] == gateway_model for launch in observed)
+    assert "--input-format" in observed[0]["args"]
+    assert "--model" in observed[1]["args"]
+
+
+@pytest.mark.posix_only
+@pytest.mark.parametrize("probe", ["enumeration", "alias"])
+async def test_model_probe_timeout_terminates_wrapper_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, probe: str
+) -> None:
+    """A wrapper child holding the probe's pipes cannot outlive its timeout."""
+    child_pid_path = tmp_path / "child.pid"
+    wrapper = textwrap.dedent("""\
+        import subprocess, sys
+        from pathlib import Path
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        Path(sys.argv[1]).write_text(str(child.pid))
+        child.wait()
+        """)
+    invocation = (sys.executable, ["-c", wrapper, str(child_pid_path)], dict(os.environ))
+    monkeypatch.setattr(
+        claude_native, "_claude_model_probe_invocation", lambda *_args, **_kwargs: invocation
+    )
+    monkeypatch.setattr(claude_native, "_CLAUDE_MODEL_PROBE_TIMEOUT_S", 1.0)
+    task = asyncio.create_task(
+        claude_native._run_claude_model_probe(None, stream_input=False)
+        if probe == "enumeration"
+        else claude_native._resolve_claude_model_alias(None, "opus")
+    )
+    child = None
+    try:
+        await poll_until_async(child_pid_path.exists, timeout_s=3)
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child = psutil.Process(int(child_pid_path.read_text()))
+        await asyncio.wait({task}, timeout=3)
+        assert task.done(), "probe timeout left a wrapper child holding its pipes open"
+        assert task.result() == (None if probe == "enumeration" else {})
+        if child is not None:
+            await poll_until_async(lambda: not _proc.process_alive(child.pid), timeout_s=1)
+    finally:
+        # Release inherited pipes if only the wrapper was terminated.
+        if child is not None:
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+        await asyncio.wait_for(task, timeout=2)
+
+
 def _stub_picker(
     monkeypatch: pytest.MonkeyPatch,
     models: list[dict[str, Any]] | None,
@@ -70,6 +230,7 @@ def _stub_picker(
     ]
 
     class Process:
+        pid = None
         returncode = 0
 
         def __init__(self, alias: str | None) -> None:
