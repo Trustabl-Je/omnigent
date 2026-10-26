@@ -29,11 +29,10 @@ import { INVENTORY_HARNESS_IDS } from "@/hooks/useHarnessInventory";
 import { BRAND_HARNESSES } from "@/components/onboarding/harnessBrand";
 import {
   HARNESS_CREDENTIAL_COPY,
-  harnessCredentialFamily,
   harnessInstallableOnHost,
   harnessReadinessOnHost,
   harnessWarningBadgeText,
-  isCodexHarness,
+  missingHarnessCredentialCopy,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
 import { NATIVE_CODING_AGENTS } from "@/lib/nativeCodingAgents";
@@ -48,8 +47,6 @@ interface HarnessEntry {
   description: string;
   agentName: string;
 }
-
-const CLAUDE_HARNESSES = new Set(["claude", "claude-native", "native-claude"]);
 
 // One-line descriptions per harness, keyed by native slug. The server catalog
 // (/v1/harnesses) carries no descriptions, so these live here; the rest of each
@@ -587,7 +584,7 @@ function HarnessDetail({
 }) {
   const status = harnessStatus(entry.harness, host);
   const credentialProblem = isCredentialProblem(status.reason);
-  const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
+  const mode = fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
   const credential = canSetup
@@ -621,18 +618,19 @@ function HarnessDetail({
     <CredentialCard
       label={credentialProblem ? "Not signed in" : credential.label}
       description={
-        credentialProblem && host ? missingCredentialCopy(entry, host) : credential.description
+        credentialProblem && host
+          ? missingHarnessCredentialCopy(entry.harness, entry.name, host.name)
+          : credential.description
       }
       ready={status.ready}
       warning={credentialProblem}
-      actionable={credentialProblem && canFix}
       showStatus={canSetup}
       statusLabel={
         status.reason === "binary-missing" || status.reason === "unconfigured"
           ? reconfigurationReason(status.reason)
           : "Needs reconfiguration"
       }
-      onClick={() => onFix(mode)}
+      onReconfigure={credentialProblem && canFix ? () => onFix(mode) : undefined}
     />
   );
   const settings = host ? (
@@ -714,18 +712,6 @@ function isCredentialProblem(reason: string | null): boolean {
   return reason === "needs-auth";
 }
 
-function missingCredentialCopy(entry: HarnessEntry, host: Host): string {
-  const family = harnessCredentialFamily(entry.harness);
-  const credential = isCodexHarness(entry.harness)
-    ? "ChatGPT account or API key"
-    : CLAUDE_HARNESSES.has(entry.harness)
-      ? "Claude subscription or API key"
-      : family !== null
-        ? "API key or gateway credential"
-        : "credential";
-  return `No ${credential} on ${host.name}, so new sessions can’t use ${entry.name}.`;
-}
-
 function MachineField({ host }: { host: Host }) {
   return (
     <div className="mt-6 grid max-w-xl grid-cols-[8rem_1fr] items-center gap-3">
@@ -755,11 +741,9 @@ function HarnessWarning({
   const copy =
     reason === "readiness-error"
       ? `${entry.name} isn’t working on ${host.name}. Run setup again to fix it.`
-      : mode === "reconfigure"
-        ? `${entry.name} can’t sign in on ${host.name}. Its credential is missing, so new sessions can’t use ${entry.name}.`
-        : mode === "update"
-          ? `${entry.name} is out of date on ${host.name}. Update it so new sessions can use ${entry.name}.`
-          : `${entry.name} isn’t set up on ${host.name}, so new sessions can’t use ${entry.name}.`;
+      : mode === "update"
+        ? `${entry.name} is out of date on ${host.name}. Update it so new sessions can use ${entry.name}.`
+        : `${entry.name} isn’t set up on ${host.name}, so new sessions can’t use ${entry.name}.`;
   const action = !installable
     ? "Set up"
     : mode === "update"
@@ -914,19 +898,17 @@ function CredentialCard({
   description,
   ready,
   warning,
-  actionable,
   showStatus,
   statusLabel,
-  onClick,
+  onReconfigure,
 }: {
   label: string;
   description: string;
   ready: boolean;
   warning: boolean;
-  actionable: boolean;
   showStatus: boolean;
   statusLabel: string;
-  onClick: () => void;
+  onReconfigure?: () => void;
 }) {
   const body = (
     <>
@@ -947,10 +929,10 @@ function CredentialCard({
         <span className="text-ui font-medium">{label}</span>
         <span className="text-xs text-muted-foreground">{description}</span>
       </span>
-      {actionable ? (
-        <Button size="sm" className="pointer-events-auto relative z-10" onClick={onClick}>
+      {onReconfigure ? (
+        <span className="inline-flex h-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary px-2.5 text-ui text-primary-foreground">
           Reconfigure
-        </Button>
+        </span>
       ) : showStatus ? (
         <span
           className={cn(
@@ -968,25 +950,15 @@ function CredentialCard({
       <h2 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
         Credential
       </h2>
-      {actionable ? (
-        <div
-          className={cn(
-            "relative w-full rounded-xl border p-3 transition-colors",
-            warning
-              ? "border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/15"
-              : "border-border hover:bg-muted/50",
-          )}
+      {onReconfigure ? (
+        <button
+          type="button"
+          aria-label="Reconfigure"
+          className="flex w-full cursor-pointer items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-left transition-colors hover:bg-amber-500/15 focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
+          onClick={onReconfigure}
         >
-          <button
-            type="button"
-            aria-label="Reconfigure credential"
-            aria-hidden
-            tabIndex={-1}
-            className="absolute inset-0 rounded-xl focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
-            onClick={onClick}
-          />
-          <div className="pointer-events-none relative flex items-center gap-3">{body}</div>
-        </div>
+          {body}
+        </button>
       ) : (
         <div
           className={cn(

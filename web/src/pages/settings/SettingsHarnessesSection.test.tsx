@@ -539,6 +539,15 @@ describe("Harness details", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reconfigure" }));
     expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
+
+    cleanup();
+    renderHarnesses("codex-native");
+    fireEvent.click(
+      screen
+        .getByText(/No ChatGPT account or API key on my-laptop/)
+        .closest("button") as HTMLButtonElement,
+    );
+    expect(screen.getByTestId("fix-dialog")).toHaveAttribute("data-mode", "reconfigure");
   });
 
   it("uses Update for an outdated harness", () => {
@@ -592,6 +601,17 @@ describe("Harness details", () => {
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/No Claude subscription or API key/)).toBeNull();
+  });
+
+  it("uses Claude credential copy for Claude needs-auth", () => {
+    hosts = [{ ...ONLINE, configured_harnesses: { "claude-native": "needs-auth" } }];
+    renderHarnesses("claude-native");
+
+    expect(
+      screen.getByText(
+        "No Claude subscription or API key on my-laptop, so new sessions can’t use Claude Code.",
+      ),
+    ).toBeTruthy();
   });
 
   it("never calls a missing binary reconfiguration", () => {
@@ -654,6 +674,8 @@ describe("Harness details", () => {
     expect(screen.queryByText("Machine")).toBeNull();
     expect(screen.queryByRole("tab", { name: /MCP servers/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Reconfigure" })).toBeNull();
+    expect(screen.queryByText("Not signed in")).toBeNull();
+    expect(screen.queryByText(/No ChatGPT account or API key on my-laptop/)).toBeNull();
   });
 
   it("keeps the working detail unchanged when harness_install is disabled", () => {
