@@ -273,15 +273,14 @@ def detect_adoptable_credentials() -> list[DetectedCredential]:
     """
     result: list[DetectedCredential] = []
     try:
-        from omnigent.onboarding.harness_readiness import _databricks_workspace_configured
+        from omnigent.onboarding.harness_readiness import _databricks_credential_source
 
-        workspace_configured = _databricks_workspace_configured()
+        databricks_source = _databricks_credential_source()
     except Exception:
-        workspace_configured = False
+        databricks_source = None
         _logger.debug("detect_adoptable_credentials: Databricks detection failed", exc_info=True)
-    if workspace_configured:
-        profile = os.environ.get("DATABRICKS_CONFIG_PROFILE", "").strip() or "DEFAULT"
-        result.append(DetectedCredential("databricks", f"Databricks profile {profile}", None))
+    if databricks_source is not None:
+        result.append(DetectedCredential("databricks", databricks_source, None))
     else:
         try:
             isaac_available = shutil.which("isaac") is not None

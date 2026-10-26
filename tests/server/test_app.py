@@ -505,7 +505,7 @@ async def test_info_reports_isaac_credential_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The Isaac credential mode supports env, static and per-request values."""
-    monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", "on")
+    monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", " ON ")
     env_app = _build_branding_app(db_uri, tmp_path, "isaac-env")
     monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", "off")
     static_app = _build_branding_app(
@@ -535,6 +535,65 @@ async def test_info_reports_isaac_credential_configuration(
     ) as client:
         assert (await client.get("/v1/info")).json()["isaac_credential"] == "auto"
         assert (await client.get("/v1/info")).json()["isaac_credential"] == "on"
+
+
+@pytest.mark.asyncio
+async def test_info_invalid_isaac_credential_env_falls_back_to_auto(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An env typo is normalized at startup and never breaks the SPA probe."""
+    monkeypatch.setenv("OMNIGENT_ISAAC_CREDENTIAL", " true ")
+    with caplog.at_level(logging.WARNING):
+        app = _build_branding_app(db_uri, tmp_path, "isaac-invalid-env")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/v1/info")
+
+    assert response.status_code == 200
+    assert response.json()["isaac_credential"] == "auto"
+    assert caplog.text.count("invalid isaac_credential value") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("behavior", ["none", "raise"])
+async def test_info_invalid_isaac_credential_callable_falls_back_to_auto(
+    db_uri: str,
+    runtime_init: None,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    behavior: str,
+) -> None:
+    """A bad dynamic policy returns auto and emits only one warning."""
+
+    def invalid_mode() -> Any:
+        if behavior == "raise":
+            raise RuntimeError("policy unavailable")
+        return None
+
+    app = _build_branding_app(
+        db_uri,
+        tmp_path,
+        f"isaac-callable-{behavior}",
+        isaac_credential=invalid_mode,
+    )
+    with caplog.at_level(logging.WARNING):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            first = await client.get("/v1/info")
+            second = await client.get("/v1/info")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["isaac_credential"] == second.json()["isaac_credential"] == "auto"
+    messages = [
+        record.message for record in caplog.records if "isaac_credential" in record.message
+    ]
+    assert len(messages) == 1
 
 
 @pytest.mark.asyncio
