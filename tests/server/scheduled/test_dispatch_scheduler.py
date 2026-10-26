@@ -16,7 +16,7 @@ from omnigent.server.scheduled.dispatch_scheduler import (
     StartupLease,
     StartupLeaseLost,
 )
-from omnigent.server.scheduled.schedule import occurrence_host_id
+from omnigent.server.scheduled.schedule import occurrence_host_id, scheduled_trigger_key
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 from tests._helpers.polling import poll_until_async
 from tests.server.scheduled.test_scheduler import FakeClock
@@ -159,22 +159,23 @@ async def test_scan_pages_past_unowned_tasks_and_ownership_errors(store) -> None
     own = ordered[-1]
     calls = []
 
-    async def owns(workspace, host):
-        calls.append(host)
-        if host == ordered[0].host_id:
+    async def owned(keys):
+        calls.append(list(keys))
+        if keys == [ordered[0].host_id]:
             raise RuntimeError("no assignment")
-        return host == own.host_id
+        return [key for key in keys if key == own.host_id]
 
     async def fire(task, lease):
         assert lease.run.host_id == own.host_id
         await lease.finish("running")
 
     scheduler = PersistentTaskScheduler(
-        store, fire, AsyncMock(), owns_host=owns, now=clock.now, batch_size=1
+        store, fire, AsyncMock(), owned_hosts=owned, now=clock.now, batch_size=1
     )
     await scheduler.poll_once()
     await _drain(scheduler)
-    assert calls == [task.host_id for task in ordered]
+    # One lookup per page; a failed lookup skips only its own page.
+    assert calls == [[task.host_id] for task in ordered]
     assert store.list_runs(own.id)[0][0].status == "running"
     assert store.list_runs(ordered[0].id)[0] == []
 
@@ -591,16 +592,16 @@ async def test_stop_prevents_a_poll_from_starting_more_work(store, monkeypatch, 
         block()
         return run
 
-    async def owns(workspace, host):
+    async def owned(keys):
         if blocked_at == "ownership":
             await asyncio.to_thread(block)
-        return True
+        return keys
 
     if blocked_at == "claim":
         monkeypatch.setattr(store, "claim_scheduled_run", claim)
     fire = AsyncMock()
     scheduler = PersistentTaskScheduler(
-        store, fire, AsyncMock(return_value=None), now=clock.now, owns_host=owns
+        store, fire, AsyncMock(return_value=None), now=clock.now, owned_hosts=owned
     )
     poll = asyncio.create_task(scheduler.poll_once())
     try:
@@ -718,12 +719,11 @@ async def test_recovery_skips_unowned_hosts_and_ownership_errors(store) -> None:
     runs = store.list_expired_starting_runs(int(clock.now()))
     checked = []
 
-    async def owns(workspace, host):
-        assert workspace == 42
-        checked.append(host)
-        if host == runs[0].host_id:
+    async def owned(keys):
+        checked.extend(keys)
+        if keys == [runs[0].host_id]:
             raise RuntimeError("ownership lookup unavailable")
-        return host == runs[-1].host_id
+        return [key for key in keys if key == runs[-1].host_id]
 
     async def recover(run):
         assert current_workspace_id() == 42
@@ -733,7 +733,7 @@ async def test_recovery_skips_unowned_hosts_and_ownership_errors(store) -> None:
     recovery = AsyncMock(side_effect=recover)
     fire = AsyncMock()
     scheduler = PersistentTaskScheduler(
-        store, fire, recovery, owns_host=owns, now=clock.now, batch_size=1
+        store, fire, recovery, owned_hosts=owned, now=clock.now, batch_size=1
     )
     try:
         for index in range(len(runs)):
@@ -1920,3 +1920,82 @@ async def test_changed_session_is_logged_again(store, caplog):
     sessions = [event["session_id"] for event in _events(caplog, "scheduled_run_session_attached")]
     assert sessions == [first, second]
     assert store.list_runs(task.id)[0][0].conversation_id == second
+
+
+async def test_claim_checks_ownership_once_per_page_with_workspace_fallback(store) -> None:
+    host_id = uuid.uuid4().hex
+    with workspace_scope(42):
+        pinned = _task(store, "pinned", host_id=host_id)
+        same_host = _task(store, "same-host", host_id=host_id)
+        sandbox = _task(store, "sandbox", execution_target="managed_sandbox")
+        # A legacy row with no pinned host is owned by its workspace's replica.
+        hostless = _task(store, "hostless")
+    assert hostless.host_id is None
+    clock = FakeClock(max(t.next_run_at for t in (pinned, same_host, sandbox, hostless)))
+    sandbox_key = occurrence_host_id(sandbox, scheduled_trigger_key(sandbox.next_run_at))
+    calls = []
+
+    async def owned(keys):
+        calls.append(list(keys))
+        # Unrequested keys are ignored.
+        return [host_id, "42", "unrequested"]
+
+    fired = []
+
+    async def fire(task, lease):
+        fired.append(task.name)
+        await lease.finish("running")
+
+    scheduler = PersistentTaskScheduler(store, fire, AsyncMock(), owned_hosts=owned, now=clock.now)
+    try:
+        await scheduler.poll_once()
+        await _drain(scheduler)
+    finally:
+        await scheduler.stop()
+    assert calls == [sorted({host_id, sandbox_key, "42"})]
+    assert sorted(fired) == ["hostless", "pinned", "same-host"]
+    with workspace_scope(42):
+        assert store.list_runs(sandbox.id)[0] == []
+        assert store.list_runs(hostless.id)[0][0].host_id is None
+
+
+async def test_recovery_ownership_lookup_is_bounded_and_retried(store, caplog) -> None:
+    with workspace_scope(7):
+        task = _task(store)
+        clock = FakeClock(task.next_run_at)
+        run = store.claim_scheduled_run(
+            task,
+            now=task.next_run_at,
+            next_run_at=task.next_run_at + 3600,
+            host_id=None,
+            lease_seconds=120,
+        )
+    clock.advance(120)
+    hang = True
+    calls = []
+
+    async def owned(keys):
+        calls.append(list(keys))
+        if hang:
+            await asyncio.Event().wait()
+        return keys
+
+    recover = AsyncMock(return_value="failed")
+    scheduler = PersistentTaskScheduler(
+        store, AsyncMock(), recover, owned_hosts=owned, now=clock.now, recovery_seconds=0.05
+    )
+    try:
+        await scheduler.poll_once()
+        await _drain(scheduler)
+        recover.assert_not_awaited()
+        assert "Could not check which of 1 hosts this server owns" in caplog.text
+        hang = False
+        await scheduler.poll_once()
+        await _drain(scheduler)
+        recover.assert_awaited_once_with(run)
+    finally:
+        await scheduler.stop()
+    # The host-less run is keyed by its workspace.
+    assert calls == [["7"], ["7"]]
+    with workspace_scope(7):
+        assert store.list_runs(task.id)[0][0].status == "failed"

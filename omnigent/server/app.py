@@ -1879,7 +1879,7 @@ def create_app(
                     store=scheduled_task_store,
                     on_fire=scheduled_task_dispatch.on_fire,
                     on_expired=scheduled_task_dispatch.on_expired,
-                    owns_host=scheduled_task_dispatch.owns_host,
+                    owned_hosts=scheduled_task_dispatch.owned_hosts,
                     poll_seconds=dispatch_config.poll_seconds,
                     renewal_seconds=dispatch_config.renewal_seconds,
                     lease_seconds=dispatch_config.lease_seconds,

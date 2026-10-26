@@ -54,3 +54,8 @@ def occurrence_host_id(task: ScheduledTask, trigger_key: str) -> str | None:
         return task.host_id
     # UUIDv5 lets every replica derive the same sandbox host ID for this task occurrence.
     return uuid.uuid5(uuid.UUID(task.id), f"{task.workspace_id}:{trigger_key}").hex
+
+
+def host_ownership_key(workspace_id: int, host_id: str | None) -> str:
+    """Key a replica's ownership check by host, or by workspace for a task with no host."""
+    return host_id if host_id is not None else str(workspace_id)
