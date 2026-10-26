@@ -43,7 +43,7 @@ import {
   isCodexHarness,
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
-import { canonicalNativeHarness } from "@/lib/nativeHarnessModes";
+import { canonicalNativeHarness, harnessAccountKey } from "@/lib/nativeHarnessModes";
 import { ApiError } from "@/lib/sessionsApi";
 import { cn } from "@/lib/utils";
 import { HarnessCredentialForm } from "@/shell/HarnessCredentialForm";
@@ -90,6 +90,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const info = useServerInfo();
   const setupSteps = useHarnessSetupSteps();
   const canonicalHarness = canonicalNativeHarness(harness);
+  const accountKey = harnessAccountKey(harness);
   const credentialFamily = harnessCredentialFamily(harness);
   const loginCommand = useMemo(() => {
     if (isCodexHarness(harness)) return "codex login --device-auth";
@@ -130,7 +131,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   const [stillNotReady, setStillNotReady] = useState(false);
   const [updatedNeedsSetup, setUpdatedNeedsSetup] = useState(false);
   const [checking, setChecking] = useState(false);
-  const account = host.harness_accounts?.[harness];
+  const account = host.harness_accounts?.[accountKey];
   const [emailHint, setEmailHint] = useState("");
   const [deviceLogin, setDeviceLogin] = useState<HarnessLoginStart | null>(null);
   const [secondsRemaining, setSecondsRemaining] = useState(0);
@@ -178,9 +179,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       const login = await startHarnessLogin(hostId, harness);
       if (runId.current !== id) return;
       setDeviceLogin(login);
-      setSecondsRemaining(
-        Math.max(0, Math.ceil((Date.parse(login.expires_at) - Date.now()) / 1000)),
-      );
+      setSecondsRemaining(Math.max(0, Math.ceil((login.expires_at * 1000 - Date.now()) / 1000)));
       setPhase("device");
     } catch (reason) {
       if (runId.current !== id) return;
@@ -385,7 +384,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     if (phase !== "device" || !deviceLogin) return;
     const tick = window.setInterval(() => {
       setSecondsRemaining(
-        Math.max(0, Math.ceil((Date.parse(deviceLogin.expires_at) - Date.now()) / 1000)),
+        Math.max(0, Math.ceil((deviceLogin.expires_at * 1000 - Date.now()) / 1000)),
       );
     }, 1000);
     return () => window.clearInterval(tick);
@@ -406,7 +405,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
             configuredHarnesses = refreshed.configured_harnesses;
             harnessAccounts = refreshed.harness_accounts;
           }
-          const signedIn = harnessAccounts?.[harness];
+          const signedIn = harnessAccounts?.[accountKey];
           const identity = [signedIn?.email, signedIn?.plan].filter(Boolean).join(" · ");
           finish(
             configuredHarnesses,
@@ -435,7 +434,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [deviceLogin, finish, harness, harnessLabel, hostId, hostName, phase]);
+  }, [accountKey, deviceLogin, finish, harness, harnessLabel, hostId, hostName, phase]);
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>

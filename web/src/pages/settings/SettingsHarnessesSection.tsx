@@ -37,6 +37,7 @@ import {
   type HarnessCredentialKind,
 } from "@/lib/harnessSetup";
 import { NATIVE_CODING_AGENTS } from "@/lib/nativeCodingAgents";
+import { harnessAccountKey } from "@/lib/nativeHarnessModes";
 import { BackButton, HarnessCatalog } from "./HarnessCatalog";
 import { HarnessFixDialog, type HarnessFixMode } from "./HarnessFixDialog";
 import { useSettingsRoute } from "../../shell/settingsNav";
@@ -287,7 +288,7 @@ export const SettingsHarnessesSection = () => {
               harness: entry.harness,
               hostId: fixedHost.host_id,
               version,
-              account: harnessAccounts?.[entry.harness],
+              account: harnessAccounts?.[harnessAccountKey(entry.harness)],
             });
           }}
         />
@@ -400,7 +401,7 @@ function credentialPresentation(
   if (override === "isaac" || host?.gateway_inference?.[harness] === true) {
     return HARNESS_CREDENTIAL_COPY.isaac;
   }
-  const account = host?.harness_accounts?.[harness];
+  const account = host?.harness_accounts?.[harnessAccountKey(harness)];
   if (account) {
     if (account.kind === "gateway") return HARNESS_CREDENTIAL_COPY.isaac;
     if (account.kind === "providers") {
@@ -441,7 +442,7 @@ function configuredAccountLabel(
   host: Host | null,
   harness: string,
 ): string | undefined {
-  const account = host?.harness_accounts?.[harness];
+  const account = host?.harness_accounts?.[harnessAccountKey(harness)];
   if (!account) return undefined;
   if (account.kind === "providers") {
     const labels = (account.providers ?? []).map((provider) => provider.label);
@@ -659,7 +660,7 @@ function HarnessDetail({
   const mode = credentialProblem ? "reconfigure" : fixMode(status.reason);
   const canFix = canSetup && !!host && !host.sandbox_provider;
   const gateway = host?.gateway_inference?.[entry.harness] === true;
-  const account = host?.harness_accounts?.[entry.harness];
+  const account = host?.harness_accounts?.[harnessAccountKey(entry.harness)];
   const presentedCredential = canSetup
     ? credentialPresentation(host, entry.harness, credentialKind)
     : gateway

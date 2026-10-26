@@ -57,7 +57,7 @@ describe("harness account routes", () => {
           login_id: "login/1",
           verification_url: "https://auth.example.test/device",
           user_code: "ABCD-EFGH",
-          expires_at: "2027-01-01T00:00:00Z",
+          expires_at: 1_798_761_600,
         }),
       )
       .mockResolvedValueOnce(mockResponse({ status: "pending", error: null }))
@@ -72,10 +72,10 @@ describe("harness account routes", () => {
     await logoutHarnessOnHost("host/1", "codex-native");
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      "/v1/hosts/host%2F1/harnesses/codex-native/login",
-      "/v1/hosts/host%2F1/harnesses/codex-native/login/login%2F1",
-      "/v1/hosts/host%2F1/harnesses/codex-native/login/login%2F1",
-      "/v1/hosts/host%2F1/harnesses/codex-native/logout",
+      "/v1/hosts/host%2F1/harnesses/codex/login",
+      "/v1/hosts/host%2F1/harnesses/codex/login/login%2F1",
+      "/v1/hosts/host%2F1/harnesses/codex/login/login%2F1",
+      "/v1/hosts/host%2F1/harnesses/codex/logout",
     ]);
     expect(fetchMock.mock.calls.map(([, init]) => init.method ?? "GET")).toEqual([
       "POST",

@@ -2798,8 +2798,14 @@ async def test_startup_discovery_cannot_publish_after_newer_capability_result(
         await discovery_release.wait()
         return {"codex-native": False}
 
+    async def _stale_accounts(*, startup: bool) -> dict[str, object]:
+        assert startup is True
+        await discovery_release.wait()
+        return {}
+
     monkeypatch.setattr(host, "_probe_configured_harnesses", _stale_configured)
     monkeypatch.setattr(host, "_probe_gateway_inference", _stale_gateway)
+    monkeypatch.setattr(host, "_probe_harness_accounts", _stale_accounts)
     if isinstance(request_frame, HostStoreSecretFrame):
         monkeypatch.setattr(host, "_handle_store_secret", lambda frame: fresh_result)
     else:

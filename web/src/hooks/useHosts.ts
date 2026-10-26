@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { authenticatedFetch } from "@/lib/identity";
+import { harnessAccountKey } from "@/lib/nativeHarnessModes";
 import { ApiError, apiErrorFromResponse } from "@/lib/sessionsApi";
 import type { NativeModelOption } from "@/lib/types";
 
@@ -390,7 +391,8 @@ export interface HarnessLoginStart {
   login_id: string;
   verification_url: string;
   user_code: string;
-  expires_at: string;
+  /** Unix epoch seconds. */
+  expires_at: number;
 }
 
 export interface HarnessLoginStatus {
@@ -409,8 +411,9 @@ export async function startHarnessLogin(
   hostId: string,
   harness: string,
 ): Promise<HarnessLoginStart> {
+  const accountKey = harnessAccountKey(harness);
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login`,
     { method: "POST" },
   );
   if (!res.ok) throw await apiErrorFromResponse(res);
@@ -422,8 +425,9 @@ export async function fetchHarnessLogin(
   harness: string,
   loginId: string,
 ): Promise<HarnessLoginStatus> {
+  const accountKey = harnessAccountKey(harness);
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login/${encodeURIComponent(loginId)}`,
   );
   if (!res.ok) throw await apiErrorFromResponse(res);
   return (await res.json()) as HarnessLoginStatus;
@@ -434,8 +438,9 @@ export async function cancelHarnessLogin(
   harness: string,
   loginId: string,
 ): Promise<void> {
+  const accountKey = harnessAccountKey(harness);
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/login/${encodeURIComponent(loginId)}`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/login/${encodeURIComponent(loginId)}`,
     { method: "DELETE" },
   );
   if (!res.ok) throw await apiErrorFromResponse(res);
@@ -445,8 +450,9 @@ export async function logoutHarnessOnHost(
   hostId: string,
   harness: string,
 ): Promise<HarnessLogoutResult> {
+  const accountKey = harnessAccountKey(harness);
   const res = await authenticatedFetch(
-    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/logout`,
+    `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(accountKey)}/logout`,
     { method: "POST" },
   );
   if (!res.ok) throw await apiErrorFromResponse(res);

@@ -552,17 +552,17 @@ describe("Harness details", () => {
           "opencode-native": true,
         },
         harness_accounts: {
-          "claude-native": {
+          claude: {
             kind: "subscription",
             email: "person@example.com",
             plan: "Max",
           },
-          "codex-native": { kind: "chatgpt", email: "codex@example.com", plan: "Plus" },
-          "pi-native": {
+          codex: { kind: "chatgpt", email: "codex@example.com", plan: "Plus" },
+          pi: {
             kind: "providers",
             providers: [{ id: "anthropic", label: "Anthropic", auth_type: "oauth" }],
           },
-          "opencode-native": {
+          opencode: {
             kind: "providers",
             providers: [
               { id: "anthropic", label: "Anthropic", auth_type: "api_key" },
@@ -589,7 +589,7 @@ describe("Harness details", () => {
       {
         ...ONLINE,
         harness_accounts: {
-          "codex-native": {
+          codex: {
             kind: "chatgpt",
             email: "codex@example.com",
             plan: "Plus",
@@ -610,7 +610,7 @@ describe("Harness details", () => {
       {
         ...ONLINE,
         harness_accounts: {
-          "claude-native": {
+          claude: {
             kind: "subscription",
             email: "person@example.com",
             plan: "Pro",

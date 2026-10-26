@@ -323,7 +323,7 @@ describe("HarnessFixDialog", () => {
           login_id: "login/1",
           verification_url: "https://auth.example.test/device",
           user_code: "WQ7K-3XPM",
-          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
         });
       }
       if (url.endsWith("/login/login%2F1")) {
@@ -336,7 +336,7 @@ describe("HarnessFixDialog", () => {
                 error: null,
                 configured_harnesses: { "codex-native": true },
                 harness_accounts: {
-                  "codex-native": {
+                  codex: {
                     kind: "chatgpt",
                     email: "codex@example.com",
                     plan: "Plus",
@@ -366,7 +366,7 @@ describe("HarnessFixDialog", () => {
         configuredHarnesses: { "codex-native": true },
         credentialKind: "personal",
         harnessAccounts: {
-          "codex-native": {
+          codex: {
             kind: "chatgpt",
             email: "codex@example.com",
             plan: "Plus",
@@ -388,7 +388,7 @@ describe("HarnessFixDialog", () => {
           login_id: "active",
           verification_url: "https://auth.example.test/device",
           user_code: "ABCD-EFGH",
-          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
         });
       }
       if (url.endsWith("/login/active") && init?.method === "DELETE") {
@@ -408,7 +408,7 @@ describe("HarnessFixDialog", () => {
     await user.click(cancel);
 
     expect(authenticatedFetch).toHaveBeenCalledWith(
-      "/v1/hosts/host%2F1/harnesses/codex-native/login/active",
+      "/v1/hosts/host%2F1/harnesses/codex/login/active",
       { method: "DELETE" },
     );
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
@@ -425,7 +425,7 @@ describe("HarnessFixDialog", () => {
           login_id: `attempt-${starts}`,
           verification_url: "https://auth.example.test/device",
           user_code: "RETRY-ME",
-          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
         });
       }
       if (url.endsWith("/login/attempt-1")) {
@@ -465,7 +465,7 @@ describe("HarnessFixDialog", () => {
       host: {
         ...baseProps.host,
         harness_accounts: {
-          "claude-native": {
+          claude: {
             kind: "subscription",
             email: "old@example.com",
             plan: "Pro",
@@ -486,10 +486,9 @@ describe("HarnessFixDialog", () => {
     expect(
       await screen.findByText("claude auth login --claudeai --email new@example.com"),
     ).toBeVisible();
-    expect(authenticatedFetch).toHaveBeenCalledWith(
-      "/v1/hosts/host%2F1/harnesses/claude-native/logout",
-      { method: "POST" },
-    );
+    expect(authenticatedFetch).toHaveBeenCalledWith("/v1/hosts/host%2F1/harnesses/claude/logout", {
+      method: "POST",
+    });
   });
 
   it("starts Codex device sign-in after switch logout", async () => {
@@ -507,7 +506,7 @@ describe("HarnessFixDialog", () => {
           login_id: "switched",
           verification_url: "https://auth.example.test/device",
           user_code: "NEW-LOGIN",
-          expires_at: new Date(Date.now() + 15 * 60_000).toISOString(),
+          expires_at: Math.floor(Date.now() / 1000) + 15 * 60,
         });
       }
       if (url.endsWith("/login/switched")) return json({ status: "pending", error: null });
