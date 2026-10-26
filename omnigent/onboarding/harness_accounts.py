@@ -24,11 +24,16 @@ class _CodexTokenExpired(RuntimeError):
 class _StdioJsonRpc:
     """Small bounded JSON-RPC client for one Codex app-server probe."""
 
-    def __init__(self, timeout_s: float = _PROBE_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        timeout_s: float = _PROBE_TIMEOUT_S,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         codex = shutil.which("codex")
         if codex is None:
             raise FileNotFoundError("codex is not installed")
         self._deadline = time.monotonic() + timeout_s
+        self._cancel_event = cancel_event
         self._next_id = 1
         self._lines: Queue[str | None] = Queue()
         self._proc = subprocess.Popen(
@@ -80,13 +85,17 @@ class _StdioJsonRpc:
         self._proc.stdin.flush()
 
     def _read(self) -> dict[str, Any]:
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("codex account probe timed out")
-        try:
-            line = self._lines.get(timeout=remaining)
-        except Empty:
-            raise TimeoutError("codex account probe timed out") from None
+        while True:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise TimeoutError("codex account probe cancelled")
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("codex account probe timed out")
+            try:
+                line = self._lines.get(timeout=min(remaining, 0.05))
+                break
+            except Empty:
+                continue
         if line is None:
             raise RuntimeError("codex app-server exited during account probe")
         message = json.loads(line)
@@ -107,12 +116,20 @@ class _StdioJsonRpc:
             self._lines.put(None)
 
 
-def _codex_account(*, refresh_token: bool = False) -> HarnessAccount | None:
+def _codex_account(
+    *,
+    refresh_token: bool = False,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> HarnessAccount | None:
     if shutil.which("codex") is None:
         return None
     rpc: _StdioJsonRpc | None = None
     try:
-        rpc = _StdioJsonRpc()
+        rpc = _StdioJsonRpc(
+            max(0.0, deadline - time.monotonic()),
+            cancel_event=cancel_event,
+        )
         rpc.request(
             "initialize",
             {
@@ -149,31 +166,64 @@ def _codex_account(*, refresh_token: bool = False) -> HarnessAccount | None:
             rpc.close()
 
 
-def _run_json_command(argv: list[str]) -> tuple[int, dict[str, Any] | None]:
-    try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_TIMEOUT_S,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+def _run_json_command(
+    argv: list[str],
+    *,
+    deadline: float,
+    cancel_event: threading.Event | None,
+) -> tuple[int, dict[str, Any] | None]:
+    if cancel_event is not None and cancel_event.is_set():
+        return 1, None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
         return 1, None
     try:
-        payload = json.loads(completed.stdout)
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError:
+        return 1, None
+    try:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise subprocess.TimeoutExpired(argv, 0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, 0)
+            try:
+                stdout, _stderr = process.communicate(timeout=min(remaining, 0.05))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+        return 1, None
+    try:
+        payload = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
-        return completed.returncode, None
-    return completed.returncode, cast(dict[str, Any], payload) if isinstance(
-        payload, dict
-    ) else None
+        return process.returncode, None
+    return process.returncode, cast(dict[str, Any], payload) if isinstance(payload, dict) else None
 
 
-def _claude_account() -> HarnessAccount | None:
+def _claude_account(
+    *, deadline: float, cancel_event: threading.Event | None
+) -> HarnessAccount | None:
     claude = shutil.which("claude")
     if claude is None:
         return None
-    return_code, payload = _run_json_command([claude, "auth", "status", "--json"])
+    return_code, payload = _run_json_command(
+        [claude, "auth", "status", "--json"],
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
     if payload is None or return_code != 0:
         return {"kind": "unknown"}
     if payload.get("loggedIn") is not True:
@@ -195,7 +245,7 @@ def _claude_account() -> HarnessAccount | None:
     return account
 
 
-def _pi_account() -> HarnessAccount | None:
+def _pi_account(*, deadline: float, cancel_event: threading.Event | None) -> HarnessAccount | None:
     pi = shutil.which("pi")
     if pi is None:
         return None
@@ -207,7 +257,9 @@ def _pi_account() -> HarnessAccount | None:
     }
     for provider_id, label in labels.items():
         return_code, payload = _run_json_command(
-            [pi, "auth", "check", "--provider", provider_id, "--json"]
+            [pi, "auth", "check", "--provider", provider_id, "--json"],
+            deadline=deadline,
+            cancel_event=cancel_event,
         )
         if return_code != 0 or payload is None or payload.get("status") != "ready":
             continue
@@ -233,12 +285,29 @@ def _opencode_account() -> HarnessAccount | None:
     return {"kind": "providers", "providers": providers}
 
 
-def probe_harness_account(harness: str, *, refresh_codex: bool = False) -> HarnessAccount | None:
+def probe_harness_account(
+    harness: str,
+    *,
+    refresh_codex: bool = False,
+    timeout_s: float = _PROBE_TIMEOUT_S,
+    cancel_event: threading.Event | None = None,
+) -> HarnessAccount | None:
     """Probe one supported harness account without exposing credential material."""
+    deadline = time.monotonic() + timeout_s
     probes = {
-        "codex": lambda: _codex_account(refresh_token=refresh_codex),
-        "claude": _claude_account,
-        "pi": _pi_account,
+        "codex": lambda: _codex_account(
+            refresh_token=refresh_codex,
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ),
+        "claude": lambda: _claude_account(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ),
+        "pi": lambda: _pi_account(
+            deadline=deadline,
+            cancel_event=cancel_event,
+        ),
         "opencode": _opencode_account,
     }
     probe = probes.get(harness)

@@ -58,7 +58,7 @@ from omnigent.errors import (
     phase_for_code,
 )
 from omnigent.gateway_inference import gateway_inference_map
-from omnigent.harness_accounts import HarnessAccounts
+from omnigent.harness_accounts import HarnessAccount, HarnessAccounts
 from omnigent.harness_aliases import (
     canonicalize_harness,
     harness_account_key,
@@ -4306,14 +4306,9 @@ class HostProcess:
 
         async def _probe_one(harness: str) -> tuple[str, object]:
             try:
-                account = await asyncio.wait_for(
-                    self._run_host_subprocess_in_thread(
-                        lambda: probe_harness_account(
-                            harness,
-                            refresh_codex=explicit_refresh,
-                        )
-                    ),
-                    timeout=HARNESS_ACCOUNT_PROBE_TIMEOUT_S,
+                account = await self._run_harness_account_probe(
+                    harness,
+                    explicit_refresh=explicit_refresh,
                 )
                 return harness, account
             except Exception:
@@ -4322,6 +4317,59 @@ class HostProcess:
 
         results = await asyncio.gather(*(_probe_one(key) for key in HARNESS_ACCOUNT_KEYS))
         return {key: account for key, account in results if isinstance(account, dict)}
+
+    async def _run_harness_account_probe(
+        self,
+        harness: str,
+        *,
+        explicit_refresh: bool,
+    ) -> HarnessAccount | None:
+        """Run one cancel-aware account probe without using the default executor."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[HarnessAccount | None] = loop.create_future()
+        cancel_event = threading.Event()
+        self._owned_subprocess_ops += 1
+
+        def _complete(
+            result: HarnessAccount | None,
+            error: Exception | None,
+        ) -> None:
+            self._owned_subprocess_ops -= 1
+            if future.done():
+                return
+            if error is not None:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+
+        def _run() -> None:
+            result: HarnessAccount | None = None
+            error: Exception | None = None
+            try:
+                result = probe_harness_account(
+                    harness,
+                    refresh_codex=explicit_refresh,
+                    timeout_s=HARNESS_ACCOUNT_PROBE_TIMEOUT_S,
+                    cancel_event=cancel_event,
+                )
+            except Exception as exc:  # noqa: BLE001  # vendor probe failures become unknown
+                error = exc
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(_complete, result, error)
+
+        threading.Thread(
+            target=_run,
+            name=f"host-{harness}-account-probe",
+            daemon=True,
+        ).start()
+        try:
+            return await asyncio.wait_for(
+                future,
+                timeout=HARNESS_ACCOUNT_PROBE_TIMEOUT_S,
+            )
+        finally:
+            if not future.done() or future.cancelled():
+                cancel_event.set()
 
     async def _probe_gateway_inference(self, *, startup: bool) -> dict[str, bool] | None:
         """Collect gateway metadata without letting a probe break the channel."""

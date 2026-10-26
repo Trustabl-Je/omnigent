@@ -2569,6 +2569,66 @@ async def test_cancelled_readiness_probe_keeps_orphan_reaper_paused(
     assert host._host_subprocess_tasks == set()
 
 
+async def test_cancelled_account_probe_does_not_block_event_loop_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An in-flight vendor probe cannot delay Ctrl-C past event-loop shutdown."""
+    probe_started = threading.Event()
+    probe_release = threading.Event()
+    probe_cancelled = threading.Event()
+    shutdown_finished = threading.Event()
+    errors: list[BaseException] = []
+
+    def _probe(
+        harness: str,
+        *,
+        refresh_codex: bool = False,
+        timeout_s: float = 5.0,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, str] | None:
+        del refresh_codex, timeout_s
+        if harness != "codex":
+            return None
+        probe_started.set()
+        if not probe_release.wait(timeout=5):
+            raise AssertionError("test did not release account probe")
+        if cancel_event is not None and cancel_event.is_set():
+            probe_cancelled.set()
+        return {"kind": "unknown"}
+
+    monkeypatch.setattr("omnigent.host.connect.probe_harness_account", _probe)
+
+    def _run_host_loop() -> None:
+        async def _cancel_probe() -> None:
+            host = _make_host_process()
+            task = asyncio.create_task(host._probe_harness_accounts(explicit_refresh=False))
+            while not probe_started.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        try:
+            asyncio.run(_cancel_probe())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            shutdown_finished.set()
+
+    runner = threading.Thread(target=_run_host_loop)
+    runner.start()
+    try:
+        assert await asyncio.to_thread(probe_started.wait, 1)
+        assert await asyncio.to_thread(shutdown_finished.wait, 1)
+    finally:
+        probe_release.set()
+        await asyncio.to_thread(runner.join, 2)
+
+    assert not runner.is_alive()
+    assert probe_cancelled.is_set()
+    assert errors == []
+
+
 async def test_owner_lookup_overlaps_capability_discovery_after_websocket_upgrade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
