@@ -160,7 +160,7 @@ def harness_install_enabled(gate: HarnessInstallGate) -> bool:
     """Resolve the harness-install gate for the current request."""
     try:
         return bool(gate() if callable(gate) else gate)
-    except Exception:  # noqa: BLE001 — deployment gates fail closed
+    except Exception:  # deployment gates fail closed
         _logger.warning("harness_install gate failed; disabling harness setup", exc_info=True)
         return False
 
