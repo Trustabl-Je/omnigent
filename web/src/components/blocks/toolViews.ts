@@ -29,9 +29,12 @@ export interface ToolView {
 const TOOL_VIEWS = new Map<string, ToolView>();
 
 /** The registered view for a tool; Omnigent's `mcp__omnigent__x` tools resolve to `x`. */
-export function toolViewFor(name: string): ToolView | undefined {
-  const exact = TOOL_VIEWS.get(name);
+export function toolViewFor(
+  name: string,
+  views: ReadonlyMap<string, ToolView> = TOOL_VIEWS,
+): ToolView | undefined {
+  const exact = views.get(name);
   if (exact !== undefined) return exact;
   const { server, tool } = splitToolName(name);
-  return server === undefined ? TOOL_VIEWS.get(tool) : undefined;
+  return server === undefined ? views.get(tool) : undefined;
 }

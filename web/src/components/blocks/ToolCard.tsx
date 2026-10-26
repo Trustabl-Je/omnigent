@@ -1,9 +1,6 @@
-// Tool-call renderer: a muted trigger line (status icon, title, one-line
-// result) that expands to the input and result as labeled fields, with raw
-// JSON one toggle away. The big border-stripe / badge / pill card shell was
-// removed deliberately: tool calls used to dominate the transcript, and the
-// goal is for the assistant's prose to read first. Tool-specific rendering
-// plugs in through `toolViews.ts`.
+// Tool-call row: icon, title and a one-line result, expanding to labeled input
+// and result fields with the raw payload one toggle away. Kept light so the
+// assistant's prose reads first; per-tool views plug in through `toolViews.ts`.
 
 import {
   CheckIcon,
@@ -54,7 +51,12 @@ import {
   shellToolCall,
   splitEnvPrefix,
 } from "@/lib/toolTitle";
-import { parseToolOutput, toolErrorMessage } from "@/lib/toolValue";
+import {
+  type ParsedToolOutput,
+  isRecord,
+  parseToolOutput,
+  toolErrorMessage,
+} from "@/lib/toolValue";
 import { resolveChatFilePath } from "@/hooks/useWorkspaceChangedFiles";
 import { useFileViewer, useWorkspacePaths } from "@/shell/FileViewerContext";
 import { ToolValueView } from "./ToolValueView";
@@ -310,7 +312,7 @@ function ToolSectionLabel({ children }: { children: ReactNode }) {
 }
 
 type ResultPresentation =
-  | { kind: "error"; message: string }
+  | { kind: "error"; message: string; fields: Record<string, unknown> | null }
   | { kind: "fields"; value: unknown }
   | { kind: "inline"; text: string }
   | { kind: "panel"; text: string; language: CodeLanguage };
@@ -323,17 +325,38 @@ type ResultPresentation =
 function presentToolResult(output: string): ResultPresentation {
   const parsed = parseToolOutput(output);
   const error = toolErrorMessage(parsed);
-  if (error !== null) return { kind: "error", message: error };
+  if (error !== null) return { kind: "error", message: error, fields: errorContext(parsed) };
   if (parsed.kind === "json") {
-    const pretty = JSON.stringify(parsed.value, null, 2);
+    const pretty = prettyJson(parsed.value);
+    if (pretty === null) return { kind: "panel", text: parsed.text, language: "text" };
     if (!getOutputPreview(pretty).isTruncated) return { kind: "fields", value: parsed.value };
     return { kind: "panel", text: pretty, language: "json" };
   }
   const text = stripAnsi(parsed.text);
-  if (!text.includes("\n") && text.length <= INLINE_RESULT_MAX_CHARS) {
-    return { kind: "inline", text: text.trim() };
+  const trimmed = text.trim();
+  if (!trimmed.includes("\n") && trimmed.length <= INLINE_RESULT_MAX_CHARS) {
+    return { kind: "inline", text: trimmed };
   }
   return { kind: "panel", text, language: "text" };
+}
+
+/** A failed record's other fields, shown under its error; `null` when it has none. */
+function errorContext(parsed: ParsedToolOutput): Record<string, unknown> | null {
+  if (parsed.kind !== "json" || !isRecord(parsed.value)) return null;
+  const record = parsed.value;
+  // `{"error": true, "message": ...}` already shows its message as the error.
+  const shown = new Set(record.error === true ? ["error", "message"] : ["error"]);
+  const rest = Object.entries(record).filter(([key]) => !shown.has(key));
+  return rest.length > 0 ? Object.fromEntries(rest) : null;
+}
+
+/** Two-space JSON, or `null` when the value nests too deeply to serialize. */
+function prettyJson(value: unknown): string | null {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return null;
+  }
 }
 
 function ToolResultView({
@@ -359,8 +382,11 @@ function ToolResultView({
   switch (presentation.kind) {
     case "error":
       return (
-        <div className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-sm">
-          {presentation.message}
+        <div className="space-y-2">
+          <div className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-sm">
+            {presentation.message}
+          </div>
+          {presentation.fields !== null && <ToolValueView value={presentation.fields} />}
         </div>
       );
     case "fields":

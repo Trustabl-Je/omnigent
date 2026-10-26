@@ -1,19 +1,9 @@
-// Per-tool display title formatter for the tool-call trigger row.
-//
-// The transcript was full of titles like `sys_os_shell({"command":"ls
-// -la"})` — accurate but visually noisy. This module rewrites the
-// common built-in tool calls into short, plain-English phrases that
-// match how a human would describe the action ("ls -la", "Read
-// foo.py", "Start child session: 'researcher - auth'").
-//
-// The result is split into a `verb` (rendered bold by the trigger row
-// so the action stands out) and a `body` (the dynamic, less-important
-// payload: paths, queries, commands). Tools without a formatter get a
-// humanized name and their key argument values ("Get issue OMNI-12"),
-// with the MCP server shown as a tag; the raw name stays in the tooltip.
+// Titles for tool-call rows: a bold `verb` plus a dynamic `body` ("Read foo.py").
+// Tools without a formatter get a humanized name and key argument values, with
+// the MCP server as a tag and the raw name in the tooltip.
 
 import type { ShellOutputFormat } from "@/lib/shellToolOutput";
-import { identifierWords, sentenceCase } from "@/lib/toolValue";
+import { identifierWords, ownValue, sentenceCase } from "@/lib/toolValue";
 
 /**
  * Structured title for a tool call.
@@ -224,7 +214,7 @@ const FORMATTERS: Record<string, ArgFormatter> = {
  */
 export function formatToolTitle(name: string, args: Record<string, unknown>): ToolTitle {
   const { server, tool } = splitToolName(name);
-  const formatter = server === undefined ? FORMATTERS[tool] : undefined;
+  const formatter = server === undefined ? ownValue(FORMATTERS, tool) : undefined;
   if (formatter !== undefined) {
     const title = formatter(args);
     if (title !== null && (title.verb !== null || title.body.length > 0)) {
@@ -241,7 +231,7 @@ export function formatToolTitle(name: string, args: Record<string, unknown>): To
 
 // `server__tool`, as Claude Code names MCP tools after an `mcp__` prefix and
 // SDK harnesses name a spec-declared MCP server's tools without one.
-const SERVER_TOOL_RE = /^([A-Za-z0-9][\w-]*?)__([A-Za-z0-9][\s\S]*)$/;
+const SERVER_TOOL_RE = /^([A-Za-z0-9](?:[\w-]*?[A-Za-z0-9])?)__([A-Za-z0-9][\s\S]*)$/;
 
 /**
  * Split an MCP tool name into its server and tool: `mcp__linear__get_issue`
@@ -338,19 +328,35 @@ const ARG_LIST_ITEM_MAX_CHARS = 40;
 // Numbers only identify something under id-like keys; a bare `20` from
 // `limit` or `max_results` means nothing in a one-line summary.
 const ID_LIKE_KEY_WORDS = new Set(["id", "number", "num", "pid", "port"]);
-const SECRET_KEY_RE = /token|secret|password|passwd|api_?key|authorization|credential/i;
+// Words that mark an argument as a credential; matched per word so `author` passes.
+const SECRET_KEY_WORDS = new Set([
+  "apikey",
+  "auth",
+  "authorization",
+  "bearer",
+  "cookie",
+  "credential",
+  "credentials",
+  "key",
+  "passphrase",
+  "passwd",
+  "password",
+  "pat",
+  "private",
+  "secret",
+  "signature",
+  "token",
+]);
 
 /**
- * The key argument values for a collapsed row, joined with " · ": short
- * strings, id-like numbers, and list sizes, in argument order. Multi-line or
- * long strings, nested objects, and secret-looking keys are left for the
- * expanded view.
+ * Key argument values for a collapsed row, joined with " · "; skips long,
+ * multi-line, nested and secret-looking values.
  */
 export function summarizeArgs(args: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(args)) {
     if (parts.length >= ARG_SUMMARY_PARTS) break;
-    if (SECRET_KEY_RE.test(key)) continue;
+    if (identifierWords(key).some((word) => SECRET_KEY_WORDS.has(word))) continue;
     const part = argSummaryPart(key, value);
     if (part !== null) parts.push(part);
   }
@@ -479,7 +485,7 @@ function decodeShellWord(text: string): string | null {
 
 /** Whether `name` is a shell-command tool in any harness (Bash, shell, sys_os_shell...). */
 export function isShellTool(name: string): boolean {
-  return RUN_CATEGORIES[stripOmnigentPrefix(name)] === "shell";
+  return ownValue(RUN_CATEGORIES, stripOmnigentPrefix(name)) === "shell";
 }
 
 /** A shell tool call: the command line it ran and how its output is shaped. */
@@ -505,7 +511,7 @@ export function shellToolCall(name: string, args: Record<string, unknown>): Shel
   const bareName = stripOmnigentPrefix(name);
   return {
     command: bareName === "shell" ? unwrapShellCommand(command) : command,
-    outputFormat: SHELL_OUTPUT_FORMATS[bareName] ?? "plain",
+    outputFormat: ownValue(SHELL_OUTPUT_FORMATS, bareName) ?? "plain",
   };
 }
 
@@ -548,7 +554,7 @@ export function shellCommandPreview(script: string): { firstLine: string; moreLi
 /** The action category of a tool call, e.g. `Bash("ls")` -> "list". */
 export function toolCallCategory(call: ToolRunCall): RunCategory | "other" {
   const name = stripOmnigentPrefix(call.name);
-  const category = RUN_CATEGORIES[name] ?? "other";
+  const category = ownValue(RUN_CATEGORIES, name) ?? "other";
   if (category === "shell") {
     const raw = typeof call.args?.command === "string" ? call.args.command : "";
     const command = unwrapShellCommand(raw);

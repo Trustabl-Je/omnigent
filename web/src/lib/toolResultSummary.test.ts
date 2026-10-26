@@ -29,6 +29,19 @@ describe("summarizeToolResult", () => {
       ).toEqual({ text: "Exit code 1: FAILED tests/test_a.py::test_x", isError: true });
     });
 
+    it("reports a failure from a shell format that carries no exit code", () => {
+      // WHY: Claude's Bash output has no exit code, so its failures show only in the text.
+      expect(
+        summarize("Bash", "<tool_use_error>Permission to use Bash was denied.</tool_use_error>", {
+          command: "rm -rf build",
+        }),
+      ).toEqual({ text: "Permission to use Bash was denied.", isError: true });
+      expect(summarize("sys_os_shell", '{"error": "command blocked"}', { command: "x" })).toEqual({
+        text: "command blocked",
+        isError: true,
+      });
+    });
+
     it("reports a sys_os_shell timeout", () => {
       const output = JSON.stringify({ stdout: "", stderr: "", exit_code: null, timed_out: true });
       expect(summarize("sys_os_shell", output, { command: "sleep 99" })).toEqual({
@@ -56,6 +69,11 @@ describe("summarizeToolResult", () => {
       expect(summarize("sys_os_read", JSON.stringify({ path: "e", content: "" }))?.text).toBe(
         "Empty file",
       );
+      expect(summarize("sys_os_read", JSON.stringify({ path: "e", content: "\n" }))?.text).toBe(
+        "Empty file",
+      );
+      const emptyRead = "<system-reminder>Warning: the file exists but is empty.</system-reminder>";
+      expect(summarize("Read", emptyRead, { file_path: "e" })?.text).toBe("Empty file");
     });
   });
 

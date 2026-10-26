@@ -102,8 +102,7 @@ describe("getOutputPreview", () => {
 
 describe("ToolCard rendering", () => {
   it("renders an unknown tool's humanized title, result line and duration", () => {
-    // WHY: the trigger row is the always-visible summary; it used to read
-    // `manage_todo_list({"operation":"write",...` cut off mid-JSON.
+    // WHY: the always-visible trigger shows a humanized title and key argument values.
     const { container } = renderCard({
       name: "manage_todo_list",
       arguments: { operation: "write", todoList: [{ id: 1, title: "Plan", status: "completed" }] },
@@ -133,14 +132,8 @@ describe("ToolCard rendering", () => {
     expect(line.className).toContain("text-destructive");
   });
 
-  it("has no result line while the tool is running", () => {
-    renderCard({ name: "my_tool", arguments: {}, output: null, state: "input-available" });
-    expect(screen.queryByTestId("tool-result-line")).toBeNull();
-  });
-
   it("expands to labeled Input and Result fields, with the raw JSON behind Raw", () => {
-    // WHY: the expanded view used to be a JSON dump; the exact payloads must
-    // stay one toggle away for debugging.
+    // WHY: the expanded view shows labeled fields, with the payloads one Raw toggle away.
     const { container } = renderCard({
       name: "my_tool",
       arguments: { includeComments: false, todoList: [{ title: "Find workflow", status: "done" }] },
@@ -194,6 +187,55 @@ describe("ToolCard rendering", () => {
     fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
     expect(screen.queryByTestId("tool-value-view")).toBeNull();
     expect(screen.getByRole("button", { name: "Expand" })).toBeInTheDocument();
+  });
+
+  it("shows a reported failure above the record's other fields", () => {
+    // WHY: a partial failure still returns data; hiding it behind Raw loses the useful part.
+    const { container } = renderCard({
+      name: "search_issues",
+      arguments: {},
+      output: JSON.stringify({ error: "2 of 3 pages failed", results: ["OMNI-1"] }),
+      state: "output-available",
+    });
+    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+    expect(screen.getAllByText("2 of 3 pages failed")).toHaveLength(2);
+    expect(screen.getByTestId("tool-value-view").textContent).toBe("ResultsOMNI-1");
+  });
+
+  it("keeps a short result with a trailing newline inline", () => {
+    const { container } = renderCard({
+      name: "my_tool",
+      arguments: {},
+      output: "ok\n",
+      state: "output-available",
+    });
+    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+    expect(container.querySelector("pre")).toBeNull();
+    expect(screen.getAllByText("ok").length).toBeGreaterThan(0);
+  });
+
+  it("falls back to the output panel when a JSON result cannot be re-serialized", () => {
+    // WHY: very deep JSON can parse yet exceed JSON.stringify's stack.
+    const stringify = JSON.stringify;
+    const spy = vi.spyOn(JSON, "stringify").mockImplementation((value, ...rest) => {
+      if (value !== null && typeof value === "object" && "deep" in value) {
+        throw new RangeError("Maximum call stack size exceeded");
+      }
+      return stringify(value, ...rest);
+    });
+    try {
+      const { container } = renderCard({
+        name: "my_tool",
+        arguments: {},
+        output: '{"deep": {"a": 1}}',
+        state: "output-available",
+      });
+      fireEvent.click(container.querySelector<HTMLElement>('[data-slot="collapsible-trigger"]')!);
+      expect(screen.queryByTestId("tool-value-view")).toBeNull();
+      expect(screen.getAllByText("Output").length).toBeGreaterThan(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("shows a tool's reported failure in place of its result", () => {

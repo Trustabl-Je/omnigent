@@ -38,6 +38,8 @@ const FILE_SEARCH_TOOLS = new Set(["Grep", "Glob", "grep", "glob"]);
 // Harness file reads number each line, after a tab, an arrow (U+2192), or a
 // pipe: "    12\tcode", "00012| code".
 const NUMBERED_LINE_RE = /^\s*\d+(?:\t|\u2192|\| )/;
+// Notes Claude Code appends to a read; they are not lines of the file.
+const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
 
 /**
  * Summarize a finished call's result, or return `null` when there is nothing
@@ -48,7 +50,13 @@ export function summarizeToolResult(call: ToolCall): ToolResultSummary | null {
   if (call.output === null || call.state === "input-available") return null;
   const shellCall = shellToolCall(call.name, call.args);
   if (shellCall !== null) {
-    return summarizeShellResult(parseShellToolOutput(call.output, shellCall.outputFormat));
+    const result = parseShellToolOutput(call.output, shellCall.outputFormat);
+    // Formats without an exit code (Claude's Bash) still report failures in the text.
+    if (result.exitCode === null && !result.timedOut) {
+      const error = toolErrorMessage(parseToolOutput(call.output));
+      if (error !== null) return failure(firstLine(error));
+    }
+    return summarizeShellResult(result);
   }
   const parsed = parseToolOutput(call.output);
   const error = toolErrorMessage(parsed);
@@ -79,9 +87,10 @@ function summarizeRead(parsed: ParsedToolOutput): ToolResultSummary | null {
     }
     text = parsed.value.content;
   }
-  const lines = text.replace(/\n$/, "").split("\n");
-  const numbered = lines.filter((line) => NUMBERED_LINE_RE.test(line)).length;
-  const count = numbered > 0 ? numbered : text.length === 0 ? 0 : lines.length;
+  const body = text.replace(SYSTEM_REMINDER_RE, "").replace(/\n$/, "");
+  const lines = body.split("\n");
+  let count = lines.filter((line) => NUMBERED_LINE_RE.test(line)).length;
+  if (count === 0 && body.trim().length > 0) count = lines.length;
   return success(count === 0 ? "Empty file" : plural(count, "line"));
 }
 

@@ -24,6 +24,12 @@ describe("humanizeKey", () => {
   it("keeps a key that has no word characters", () => {
     expect(humanizeKey("__")).toBe("__");
   });
+
+  it("treats inherited object names as plain words", () => {
+    // WHY: payload keys are arbitrary JSON; `constructor` must not hit Object.prototype.
+    expect(humanizeKey("constructor")).toBe("Constructor");
+    expect(humanizeKey("toString")).toBe("To string");
+  });
 });
 
 describe("parseToolOutput", () => {
@@ -87,6 +93,10 @@ describe("toolErrorMessage", () => {
     ["Error: 422 Validation Failed", "Error: 422 Validation Failed"],
     ["MCP error -32602: Invalid arguments", "MCP error -32602: Invalid arguments"],
     ["<tool_use_error>File does not exist.</tool_use_error>", "File does not exist."],
+    ['{"error": true, "message": "Rate limited"}', "Rate limited"],
+    ['{"error": true}', "The tool reported an error."],
+    ['{"error": {"code": 500}}', "The tool reported an error."],
+    ["<tool_use_error></tool_use_error>", "The tool reported an error."],
   ])("reports %s as a failure", (output, message) => {
     expect(toolErrorMessage(parseToolOutput(output))).toBe(message);
   });
@@ -117,6 +127,7 @@ describe("statusTone", () => {
     ["In_Progress", "active"],
     ["FAILED", "failure"],
     ["not-started", "neutral"],
+    ["constructor", "neutral"],
   ])("%s -> %s", (status, tone) => {
     expect(statusTone(status)).toBe(tone);
   });
@@ -131,6 +142,9 @@ describe("isoTimestampMs", () => {
     expect(isoTimestampMs("2026-10-27T09:00:00-07:00")).toBe(Date.parse("2026-10-27T16:00:00Z"));
     expect(isoTimestampMs("2026-10-24T18:02:11.123Z")).not.toBeNull();
     expect(isoTimestampMs("2026-10-27")).toBeNull();
+    // Date.parse would roll these into the next month.
+    expect(isoTimestampMs("2026-02-30T10:00:00Z")).toBeNull();
+    expect(isoTimestampMs("2026-13-01T10:00:00Z")).toBeNull();
     expect(isoTimestampMs("tomorrow at 9")).toBeNull();
   });
 });

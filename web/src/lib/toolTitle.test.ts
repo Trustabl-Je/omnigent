@@ -152,7 +152,7 @@ describe("formatToolTitle", () => {
   });
 
   it("humanizes an unknown tool's name and lists its key argument values", () => {
-    // WHY: the fallback used to be `name({json...})`, cut off mid-JSON.
+    // WHY: a tool without a formatter still reads as an action, not as `name({json})`.
     const todoList = [
       { id: 1, title: "Find review workflow", status: "completed" },
       { id: 2, title: "Fetch open PRs", status: "in-progress" },
@@ -470,6 +470,11 @@ describe("splitToolName", () => {
     // model sees them proxied through Omnigent's MCP server.
     ["linear__get_issue", { server: "linear", tool: "get_issue" }],
     ["mcp__omnigent__linear__get_issue", { server: "linear", tool: "get_issue" }],
+    // Goose names its tools by MCP extension, so its shell gets the extension's tag.
+    ["developer__shell", { server: "developer", tool: "shell" }],
+    // Underscores around the separator are not a server name.
+    ["a___b", { tool: "a___b" }],
+    ["__init__", { tool: "__init__" }],
     ["manage_todo_list", { tool: "manage_todo_list" }],
   ])("splits %s", (name, expected) => {
     expect(splitToolName(name)).toEqual(expected);
@@ -521,6 +526,19 @@ describe("summarizeArgs", () => {
         query: "is:open",
       }),
     ).toBe("is:open");
+  });
+
+  it("leaves credential-like arguments out, matching whole words", () => {
+    expect(
+      summarizeArgs({
+        session_token: "t1",
+        cookie: "c1",
+        access_key: "k1",
+        passphrase: "p1",
+        clientSecret: "s1",
+        author: "pat",
+      }),
+    ).toBe("pat");
   });
 
   it("caps the summary at three values", () => {

@@ -53,14 +53,19 @@ function EmptyValue() {
 
 function FieldList({ entries, depth }: { entries: [string, unknown][]; depth: number }) {
   if (entries.length === 0) return <EmptyValue />;
+  const shown = entries.slice(0, MAX_LIST_ROWS);
+  const hidden = entries.length - shown.length;
   return (
-    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
-      {entries.map(([key, value]) => (
-        <FieldRow key={key} label={humanizeKey(key)} title={key}>
-          <ValueNode value={value} depth={depth + 1} />
-        </FieldRow>
-      ))}
-    </dl>
+    <>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+        {shown.map(([key, value]) => (
+          <FieldRow key={key} label={humanizeKey(key)} title={key}>
+            <ValueNode value={value} depth={depth + 1} />
+          </FieldRow>
+        ))}
+      </dl>
+      {hidden > 0 && <p className="mt-1 text-muted-foreground text-xs">and {hidden} more</p>}
+    </>
   );
 }
 
@@ -175,8 +180,10 @@ function RecordRow({ record, position }: { record: Record<string, unknown>; posi
   const title = pickTitleField(record);
   const detail = pickDetailField(record);
   const status = pickStatusField(record);
-  const index = typeof record.id === "number" ? record.id : position;
-  const shownKeys = new Set([title?.key, detail?.key, status?.key, "id"]);
+  const numericId = typeof record.id === "number" ? record.id : null;
+  const shownKeys = new Set([title?.key, detail?.key, status?.key]);
+  // A text id ("OMNI-12243") stays with the other fields; only a number is the index.
+  if (numericId !== null) shownKeys.add("id");
   const extras = Object.entries(record).filter(
     ([key, value]) =>
       !shownKeys.has(key) && (typeof value === "string" || typeof value === "number"),
@@ -184,7 +191,7 @@ function RecordRow({ record, position }: { record: Record<string, unknown>; posi
   return (
     <li className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] gap-x-2">
       <span className="text-muted-foreground/70 text-xs tabular-nums leading-[inherit]">
-        {index}
+        {numericId ?? position}
       </span>
       <span className="min-w-0 break-words">{title?.value ?? <EmptyValue />}</span>
       {status === null ? <span /> : <StatusBadge status={status.value} />}
@@ -198,7 +205,7 @@ function RecordRow({ record, position }: { record: Record<string, unknown>; posi
           {extras.slice(0, EXTRA_ROW_FIELDS).map(([key, value], extraIndex) => (
             <span key={key}>
               {extraIndex > 0 && " · "}
-              {humanizeKey(key)} <StringValue text={String(value)} />
+              {humanizeKey(key)} <ExtraValue value={value as string | number} />
             </span>
           ))}
           {extras.length > EXTRA_ROW_FIELDS && ` · +${extras.length - EXTRA_ROW_FIELDS} more`}
@@ -206,6 +213,17 @@ function RecordRow({ record, position }: { record: Record<string, unknown>; posi
       )}
     </li>
   );
+}
+
+/** A record's extra field on its one-line summary: long or multi-line text collapses. */
+function ExtraValue({ value }: { value: string | number }) {
+  if (
+    typeof value === "number" ||
+    (!value.includes("\n") && value.length <= INLINE_CHIP_MAX_CHARS)
+  ) {
+    return <StringValue text={String(value)} />;
+  }
+  return value.replace(/\s+/g, " ");
 }
 
 const STATUS_TONE_CLASS: Record<StatusTone, string> = {

@@ -40,11 +40,16 @@ export function identifierWords(identifier: string): string[] {
     .map((word) => word.toLowerCase());
 }
 
+/** `record[key]` for an own property only, so payload keys like `constructor` miss. */
+export function ownValue<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 /** Words as a sentence-case label: `["next", "run", "at"]` -> "Next run at". */
 export function sentenceCase(words: string[]): string {
   return words
     .map((word, index) => {
-      const acronym = ACRONYMS[word];
+      const acronym = ownValue(ACRONYMS, word);
       if (acronym !== undefined) return acronym;
       return index === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word;
     })
@@ -112,20 +117,26 @@ function contentBlockText(value: unknown): string | null {
 // "MCP error -32602: ...", "Error executing tool x: ...".
 const ERROR_TEXT_RE = /^(?:(?:error|fatal)\s*:|mcp error\b|error (?:executing|calling|running)\b)/i;
 const TOOL_USE_ERROR_RE = /^<tool_use_error>([\s\S]*?)(?:<\/tool_use_error>)?\s*$/;
+const UNNAMED_ERROR = "The tool reported an error.";
 
 /** The failure message a tool reported in its output, or `null` when it succeeded. */
 export function toolErrorMessage(parsed: ParsedToolOutput): string | null {
   if (parsed.kind === "json") {
     if (!isRecord(parsed.value)) return null;
-    const { error } = parsed.value;
+    const { error, message } = parsed.value;
     if (typeof error === "string" && error.length > 0) return error;
-    if (isRecord(error) && typeof error.message === "string") return error.message;
+    if (isRecord(error)) return nonEmpty(error.message) ?? UNNAMED_ERROR;
+    if (error === true) return nonEmpty(message) ?? UNNAMED_ERROR;
     return null;
   }
   const text = stripAnsi(parsed.text).trim();
   const wrapped = TOOL_USE_ERROR_RE.exec(text);
-  if (wrapped !== null) return wrapped[1]!.trim();
+  if (wrapped !== null) return nonEmpty(wrapped[1]!.trim()) ?? UNNAMED_ERROR;
   return ERROR_TEXT_RE.test(text) ? text : null;
+}
+
+function nonEmpty(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 /** First non-blank line of a text, without ANSI escapes. */
@@ -226,14 +237,11 @@ const STATUS_TONES: Record<string, StatusTone> = {
 
 /** How a status value should be colored: "in_progress" -> "active". */
 export function statusTone(status: string): StatusTone {
-  return (
-    STATUS_TONES[
-      status
-        .trim()
-        .toLowerCase()
-        .replace(/[\s_]+/g, "-")
-    ] ?? "neutral"
-  );
+  const key = status
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, "-");
+  return ownValue(STATUS_TONES, key) ?? "neutral";
 }
 
 /** A status value as words: "in_progress" -> "in progress". */
@@ -242,11 +250,16 @@ export function statusLabel(status: string): string {
 }
 
 const ISO_TIMESTAMP_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
+  /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/;
 
 /** Epoch milliseconds of an ISO-8601 date-time string, or `null` for anything else. */
 export function isoTimestampMs(text: string): number | null {
-  if (!ISO_TIMESTAMP_RE.test(text)) return null;
+  const match = ISO_TIMESTAMP_RE.exec(text);
+  if (match === null) return null;
+  // Date.parse rolls an impossible date (February 30) into the next month.
+  const [year, month, day] = match.slice(1, 4).map(Number) as [number, number, number];
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  if (calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) return null;
   const ms = Date.parse(text);
   return Number.isFinite(ms) ? ms : null;
 }
