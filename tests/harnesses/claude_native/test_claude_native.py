@@ -15,6 +15,7 @@ import queue
 import re
 import shlex
 import ssl
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from omnigent._runner_startup import RunnerStartupProgress
 from omnigent._startup_profile import StartupProfiler
 from omnigent._terminal_picker_theme import PICKER_ACCENT, PICKER_MUTED
 from omnigent.harnesses.claude_native import main as claude_native
+from omnigent.inner import _proc
 from omnigent.inner.native_attachments import attachment_cache_dir
 from omnigent.models.databricks_model_discovery import DatabricksClaudeCatalog
 from omnigent.native import native_terminal
@@ -10786,6 +10788,41 @@ async def test_probe_claude_model_options_runs_bare(
         {"id": "opus", "model": "opus", "displayName": "opus"},
     ]
     assert probe.default_model is None
+
+
+async def test_cancelled_claude_model_probe_kills_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host shutdown cannot wait on a probe grandchild that inherited its pipes."""
+    probe = tmp_path / "claude-probe"
+    child_pid_path = tmp_path / "child.pid"
+    probe.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "with open(os.environ['CHILD_PID_PATH'], 'w') as stream:\n"
+        "    stream.write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    probe.chmod(0o755)
+    env = {**os.environ, "CHILD_PID_PATH": str(child_pid_path)}
+    monkeypatch.setattr(
+        claude_native,
+        "_claude_model_probe_invocation",
+        lambda _config, *, stream_input: (str(probe), [], env),
+    )
+    task = asyncio.create_task(claude_native._run_claude_model_probe(None, stream_input=True))
+    deadline = asyncio.get_running_loop().time() + 2
+    while not child_pid_path.exists() and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert child_pid_path.exists()
+    child_pid = int(child_pid_path.read_text())
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+
+    assert not _proc.process_alive(child_pid)
 
 
 async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(

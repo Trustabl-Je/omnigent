@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import stat
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from omnigent import harness_accounts as account_types
+from omnigent.inner import _proc
 from omnigent.onboarding import harness_accounts, harness_login
 from omnigent.onboarding.opencode_auth import OpenCodeAuthSummary
 
@@ -147,6 +150,48 @@ else:
         "kind": "providers",
         "providers": [{"id": "anthropic", "label": "Anthropic", "auth_type": "oauth"}],
     }
+
+
+def test_cancelled_claude_probe_kills_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cancelled account probe cannot leave a pipe-holding CLI child behind."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    child_pid_path = tmp_path / "child.pid"
+    _executable(
+        bin_dir / "claude",
+        """import os, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+with open(os.environ['CHILD_PID_PATH'], 'w') as stream:
+    stream.write(str(child.pid))
+time.sleep(60)
+""",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("CHILD_PID_PATH", str(child_pid_path))
+    cancel_event = threading.Event()
+    result: list[object] = []
+    worker = threading.Thread(
+        target=lambda: result.append(
+            harness_accounts.probe_harness_account(
+                "claude", timeout_s=10, cancel_event=cancel_event
+            )
+        )
+    )
+    worker.start()
+    deadline = time.monotonic() + 2
+    while not child_pid_path.exists() and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert child_pid_path.exists()
+    child_pid = int(child_pid_path.read_text())
+
+    cancel_event.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert result == [{"kind": "unknown"}]
+    assert not _proc.process_alive(child_pid)
 
 
 def test_opencode_probe_returns_only_non_secret_metadata(

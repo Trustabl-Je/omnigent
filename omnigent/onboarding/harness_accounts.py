@@ -11,6 +11,7 @@ from queue import Empty, Queue
 from typing import Any, cast
 
 from omnigent.harness_accounts import HarnessAccount, HarnessAccounts
+from omnigent.inner import _proc
 from omnigent.onboarding.opencode_auth import opencode_auth_summary
 
 _PROBE_TIMEOUT_S = 5.0
@@ -43,18 +44,20 @@ class _StdioJsonRpc:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
+            **_proc.spawn_kwargs(),
         )
+        _proc.remember_process_group(self._proc)
         self._reader = threading.Thread(target=self._read_lines, daemon=True)
         self._reader.start()
 
     def close(self) -> None:
         """Terminate the short-lived probe process."""
+        _proc.terminate_tree(self._proc)
         if self._proc.poll() is None:
-            self._proc.terminate()
             try:
                 self._proc.wait(timeout=1)
             except subprocess.TimeoutExpired:
-                self._proc.kill()
+                _proc.kill_tree(self._proc)
                 self._proc.wait(timeout=1)
 
     def request(self, method: str, params: dict[str, object]) -> dict[str, Any]:
@@ -183,7 +186,9 @@ def _run_json_command(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            **_proc.spawn_kwargs(),
         )
+        _proc.remember_process_group(process)
     except OSError:
         return 1, None
     try:
@@ -199,11 +204,11 @@ def _run_json_command(
             except subprocess.TimeoutExpired:
                 continue
     except subprocess.TimeoutExpired:
-        process.terminate()
+        _proc.terminate_tree(process)
         try:
             process.communicate(timeout=1)
         except subprocess.TimeoutExpired:
-            process.kill()
+            _proc.kill_tree(process)
             process.communicate()
         return 1, None
     try:
