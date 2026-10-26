@@ -961,6 +961,44 @@ describe("HarnessFixDialog", () => {
     ).toBeVisible();
   });
 
+  it.each(["off", "auto"] as const)(
+    "never renders the Claude credential form before the catalog loads when Isaac is %s",
+    async (mode) => {
+      isaacCredential = mode;
+      let resolveCatalog: ((response: Response) => void) | undefined;
+      const catalogResponse = new Promise<Response>((resolve) => {
+        resolveCatalog = resolve;
+      });
+      let resolveDetection: ((response: Response) => void) | undefined;
+      const detectionResponse = new Promise<Response>((resolve) => {
+        resolveDetection = resolve;
+      });
+      vi.mocked(authenticatedFetch).mockImplementation(async (input) => {
+        const url = String(input);
+        if (url === "/v1/harnesses") return catalogResponse;
+        if (url.endsWith("/credentials/detected")) return detectionResponse;
+        throw new Error(`Unexpected URL: ${url}`);
+      });
+
+      renderDialog({ harness: "claude-native", harnessLabel: "Claude Code" });
+
+      expect(screen.queryByTestId("harness-credential-form")).not.toBeInTheDocument();
+      if (mode === "auto") {
+        expect(
+          screen.getByText("Checking which credentials are available on Local laptop…"),
+        ).toBeVisible();
+        await act(async () => resolveDetection?.(json({ credentials: [] })));
+      }
+      expect(await screen.findByRole("radio", { name: /Personal subscription/ })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(screen.queryByTestId("harness-credential-form")).not.toBeInTheDocument();
+
+      await act(async () => resolveCatalog?.(json(catalog)));
+    },
+  );
+
   it("does not flash an Isaac choice for Pi while automatic detection is pending", async () => {
     isaacCredential = "auto";
     let resolveDetection: ((response: Response) => void) | undefined;
