@@ -190,3 +190,28 @@ def test_{name}(pytestconfig):
     assert sorted(written) == ["first.txt", "second.txt"]
     assert sorted(written.values()) == ["gw0", "gw1"]
     assert not (output / "stale.txt").exists()
+
+
+def test_private_home_outlives_other_unconfigure_hooks(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The root conftest reaps leaked processes in pytest_unconfigure; keep their home."""
+    _configure(pytester, monkeypatch)
+    pytester.makepyfile(
+        reaper_probe="""
+import json, os
+from pathlib import Path
+
+def pytest_unconfigure(config):
+    home = os.environ.get("OMNIGENT_CONFIG_HOME")
+    Path(os.environ["ISOLATION_RECORDS"], "reaper.json").write_text(
+        json.dumps({"home": home, "exists": bool(home) and Path(home).is_dir()})
+    )
+""",
+        test_pass="def test_pass(): pass\n",
+    )
+    result = pytester.runpytest_subprocess("-q", "-p", "reaper_probe")
+    result.assert_outcomes(passed=1)
+    record = json.loads((pytester.path / "reaper.json").read_text())
+    assert record["exists"], record
+    assert not Path(record["home"]).exists()

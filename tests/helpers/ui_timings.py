@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,10 @@ def pytest_configure(config: pytest.Config) -> None:
         path = path.with_name(f"{path.stem}-{worker}{path.suffix}")
     else:
         # Worker files from an earlier run would mix into this run's artifacts.
+        worker_file = re.compile(rf"{re.escape(path.stem)}-gw\d+{re.escape(path.suffix)}")
         for stale in path.parent.glob(f"{path.stem}-gw*{path.suffix}"):
-            stale.unlink(missing_ok=True)
+            if worker_file.fullmatch(stale.name):
+                stale.unlink(missing_ok=True)
         if config.getoption("numprocesses", default=0):
             # The controller only relays worker reports.
             path.unlink(missing_ok=True)

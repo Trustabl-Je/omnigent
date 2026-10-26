@@ -204,3 +204,28 @@ def test_xdist_controller_leaves_config_home_to_its_workers(
     assert "OMNIGENT_CONFIG_HOME" not in os.environ
     configuration.pytest_unconfigure(config)
     assert "OMNIGENT_CONFIG_HOME" not in os.environ
+
+
+@pytest.mark.parametrize(("config_home", "marker"), [(None, "stale-marker"), ("", None)])
+def test_unconfigure_restores_both_variables_exactly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, config_home: str | None, marker: str | None
+) -> None:
+    monkeypatch.setattr("omnigent.config._GLOBAL_CONFIG_PATH", tmp_path / "config.yaml")
+    for name, value in (
+        ("OMNIGENT_CONFIG_HOME", config_home),
+        ("OMNIGENT_UI_TESTS_CONFIG_HOME", marker),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    for name in ("PYTEST_XDIST_WORKER", "OMNIGENT_REPRO_SERVER_URL"):
+        monkeypatch.delenv(name, raising=False)
+    config = cast(Config, _ConfigStub())
+    configuration._isolate_config_home(config)
+    private_home = Path(os.environ["OMNIGENT_CONFIG_HOME"])
+    assert private_home.is_dir()
+    configuration.pytest_unconfigure(config)
+    assert os.environ.get("OMNIGENT_CONFIG_HOME") == config_home
+    assert os.environ.get("OMNIGENT_UI_TESTS_CONFIG_HOME") == marker
+    assert not private_home.exists()

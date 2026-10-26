@@ -145,10 +145,13 @@ def test_new_run_replaces_previous_timing_file(
     path.write_text("stale records from an earlier run\n")
     stale_worker = path.with_name("timings-gw0.jsonl")
     stale_worker.write_text("stale records from an earlier parallel run\n")
+    lookalike = path.with_name("timings-gw-notes.jsonl")
+    lookalike.write_text("not a worker file\n")
     pytester.makepyfile("def test_pass(): pass")
     result = pytester.runpytest_subprocess("-q", f"--ui-timing-output={path}")
     result.assert_outcomes(passed=1)
     assert not stale_worker.exists()
+    assert lookalike.read_text() == "not a worker file\n"
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [r["type"] for r in records] == ["plan", "phase", "phase", "phase", "finish"]
     assert records[-1] == {"type": "finish", "exitstatus": 0}

@@ -19,7 +19,7 @@ _ALLOW_DEV_BASE_URL_ENV = "OMNIGENT_E2E_ALLOW_DEV_BASE_URL"
 _CONFIG_HOME_ENV = "OMNIGENT_CONFIG_HOME"
 # Marks a config home created by this suite, so xdist workers replace it.
 _SUITE_CONFIG_HOME_ENV = "OMNIGENT_UI_TESTS_CONFIG_HOME"
-_CONFIG_HOME_KEY = pytest.StashKey[tuple[Path, str | None]]()
+_CONFIG_HOME_KEY = pytest.StashKey[tuple[Path, dict[str, str | None]]]()
 _CLAUDE_MOCK_MODEL = "claude-sonnet-4-20250514"
 _CODEX_MOCK_MODEL = "gpt-4o"
 # USD per million tokens (input, output, cache read) for the mock codex provider.
@@ -74,16 +74,18 @@ def pytest_configure(config: pytest.Config) -> None:
     _isolate_playwright_output(config)
 
 
+# Run after the root conftest reaps leaked processes that may still use this home.
+@pytest.hookimpl(trylast=True)
 def pytest_unconfigure(config: pytest.Config) -> None:
     """Restore the inherited config home and remove this process's private copy."""
     if (owned := config.stash.get(_CONFIG_HOME_KEY, None)) is None:
         return
-    home, inherited = owned
-    for name in (_CONFIG_HOME_ENV, _SUITE_CONFIG_HOME_ENV):
-        if inherited is None:
+    home, originals = owned
+    for name, value in originals.items():
+        if value is None:
             os.environ.pop(name, None)
         else:
-            os.environ[name] = inherited
+            os.environ[name] = value
     shutil.rmtree(home, ignore_errors=True)
 
 
@@ -117,8 +119,9 @@ def _isolate_config_home(config: pytest.Config) -> None:
             fd = os.open(home / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
+    originals = {name: os.environ.get(name) for name in (_CONFIG_HOME_ENV, _SUITE_CONFIG_HOME_ENV)}
     os.environ[_CONFIG_HOME_ENV] = os.environ[_SUITE_CONFIG_HOME_ENV] = str(home)
-    config.stash[_CONFIG_HOME_KEY] = (home, inherited)
+    config.stash[_CONFIG_HOME_KEY] = (home, originals)
 
 
 def _isolate_playwright_output(config: pytest.Config) -> None:
