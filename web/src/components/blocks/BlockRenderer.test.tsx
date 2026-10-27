@@ -588,11 +588,11 @@ describe("BlockRenderer dispatch", () => {
       const runTrigger = runLabel.closest("button");
       expect(runTrigger?.firstElementChild).toBe(runLabel);
       expect(runTrigger?.lastElementChild?.tagName.toLowerCase()).toBe("svg");
-      expect(runTrigger).toHaveClass("text-chat");
+      expect(runTrigger).toHaveClass("text-ui");
       expect(runTrigger).not.toHaveClass("text-sm");
       fireEvent.click(runTrigger!);
       const individualToolTrigger = screen.getByText("Tool 3").closest("button");
-      expect(individualToolTrigger).toHaveClass("text-chat");
+      expect(individualToolTrigger).toHaveClass("text-ui");
       expect(individualToolTrigger).not.toHaveClass("text-sm");
       // The answer remains visible after expansion too.
       expect(screen.getByText("All done here.")).toBeDefined();
@@ -708,7 +708,7 @@ describe("BlockRenderer dispatch", () => {
       expect(trigger).toHaveAttribute("type", "button");
       expect(trigger).toHaveAttribute("aria-expanded", "false");
       expect(trigger).toHaveClass("gap-2", "py-1");
-      expect(trigger).toHaveClass("text-chat");
+      expect(trigger).toHaveClass("text-ui");
       expect(trigger).not.toHaveClass("text-sm");
       expect(trigger).not.toHaveClass("w-full");
       expect(trigger.querySelector(".border-t")).toBeNull();

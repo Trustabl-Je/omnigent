@@ -308,7 +308,7 @@ function GenericToolBody({ call, duration }: ToolBodyProps) {
 }
 
 function ToolSectionLabel({ children }: { children: ReactNode }) {
-  return <div className="font-medium text-muted-foreground text-xs">{children}</div>;
+  return <div className="font-medium text-muted-foreground text-sm">{children}</div>;
 }
 
 type ResultPresentation =
@@ -442,7 +442,7 @@ export function ToolGroupSummary({ tools }: { tools: RenderItem[] }) {
     // any ancestor `.group[data-state=open]` and incorrectly rotate
     // chevrons of inner tool cards when this outer group is open).
     <Collapsible defaultOpen={false} className="group/tool-summary not-prose w-full">
-      <CollapsibleTrigger className="flex cursor-pointer items-center gap-1.5 py-0.5 text-left text-muted-foreground text-chat transition-colors hover:text-foreground">
+      <CollapsibleTrigger className="flex cursor-pointer items-center gap-1.5 py-0.5 text-left text-muted-foreground text-ui transition-colors hover:text-foreground">
         <span>{label}</span>
         <ChevronRightIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]/tool-summary:rotate-90" />
       </CollapsibleTrigger>
@@ -491,7 +491,7 @@ function toolRunCall(item: RenderItem): ToolRunCall {
 
 /**
  * Muted trigger for a tool call. Status/category icon at left, title (verb
- * bold + dynamic body) truncated to one line, MCP server tag, optional
+ * medium + dynamic body) truncated to one line, MCP server tag, optional
  * duration, and chevron; the result summary sits on a second line.
  */
 function ToolTriggerRow({
@@ -521,21 +521,19 @@ function ToolTriggerRow({
   return (
     <CollapsibleTrigger
       title={tooltip}
-      className="block w-full cursor-pointer py-0.5 text-left text-muted-foreground text-chat transition-colors hover:text-foreground"
+      className="block w-full cursor-pointer py-0.5 text-left text-muted-foreground text-ui transition-colors hover:text-foreground"
     >
       <span className="flex w-full items-center gap-1.5">
         <StatusIcon name={name} nativeToolType={nativeToolType} state={state} />
         <span className="min-w-0 flex-1 truncate">
-          {title.verb !== null && (
-            <span className="font-semibold text-foreground">{title.verb}</span>
-          )}
+          {title.verb !== null && <span className="font-medium text-foreground">{title.verb}</span>}
           {title.verb !== null && title.body.length > 0 && " "}
           <ToolTitleBody title={title} displayPath={displayPath} onBodyClick={onBodyClick} />
         </span>
         {title.server !== undefined && (
           <Badge
             variant="outline"
-            className="h-[1.15rem] shrink-0 rounded px-1 font-normal text-muted-foreground text-xs"
+            className="h-[1.15rem] shrink-0 rounded px-1 font-normal text-muted-foreground text-sm"
           >
             {title.server}
           </Badge>
@@ -550,21 +548,17 @@ function ToolTriggerRow({
   );
 }
 
-/** The result summary under a trigger row, hooked to the row's icon like a tree branch. */
+/** The result summary under a trigger row, indented to the title past the icon. */
 function ToolResultLine({ summary }: { summary: ToolResultSummary }) {
   return (
     <span
       data-testid="tool-result-line"
       className={cn(
-        "mt-px flex min-w-0 items-start gap-1.5 pl-1.5 text-[0.92em]",
+        "mt-px block min-w-0 truncate pl-5 text-sm",
         summary.isError && "text-destructive",
       )}
     >
-      <span
-        aria-hidden="true"
-        className="mt-[0.35em] h-[0.5em] w-2 shrink-0 rounded-bl-[3px] border-current border-b border-l opacity-40"
-      />
-      <span className="min-w-0 truncate">{summary.text}</span>
+      {summary.text}
     </span>
   );
 }

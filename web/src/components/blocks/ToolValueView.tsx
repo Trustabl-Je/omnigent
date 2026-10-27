@@ -64,7 +64,7 @@ function FieldList({ entries, depth }: { entries: [string, unknown][]; depth: nu
           </FieldRow>
         ))}
       </dl>
-      {hidden > 0 && <p className="mt-1 text-muted-foreground text-xs">and {hidden} more</p>}
+      {hidden > 0 && <p className="mt-1 text-muted-foreground text-sm">and {hidden} more</p>}
     </>
   );
 }
@@ -92,7 +92,7 @@ function StringValue({ text }: { text: string }) {
   if (text.length === 0) return <EmptyValue />;
   if (text.includes("\n") || text.length > INLINE_STRING_MAX_CHARS) {
     return (
-      <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-1.5 font-mono text-xs">
+      <pre className="max-h-60 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/30 px-2.5 py-1.5 font-mono text-sm">
         {text}
       </pre>
     );
@@ -137,7 +137,7 @@ function ListValue({ items, depth }: { items: unknown[]; depth: number }) {
         {items.map((item, index) => (
           // Values can repeat and the list never reorders, so the index is the key.
           // eslint-disable-next-line react/no-array-index-key
-          <Badge key={index} variant="outline" className="font-normal text-xs">
+          <Badge key={index} variant="outline" className="font-normal text-sm">
             {String(item)}
           </Badge>
         ))}
@@ -171,7 +171,7 @@ function RecordRows({ records }: { records: Record<string, unknown>[] }) {
         // eslint-disable-next-line react/no-array-index-key
         <RecordRow key={index} record={record} position={index + 1} />
       ))}
-      {hidden > 0 && <li className="text-muted-foreground text-xs">and {hidden} more</li>}
+      {hidden > 0 && <li className="text-muted-foreground text-sm">and {hidden} more</li>}
     </ol>
   );
 }
@@ -190,18 +190,18 @@ function RecordRow({ record, position }: { record: Record<string, unknown>; posi
   );
   return (
     <li className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] gap-x-2">
-      <span className="text-muted-foreground/70 text-xs tabular-nums leading-[inherit]">
+      <span className="text-muted-foreground/70 text-sm tabular-nums leading-[inherit]">
         {numericId ?? position}
       </span>
       <span className="min-w-0 break-words">{title?.value ?? <EmptyValue />}</span>
       {status === null ? <span /> : <StatusBadge status={status.value} />}
       {detail !== null && (
-        <span className="col-span-2 col-start-2 text-muted-foreground text-xs leading-snug">
+        <span className="col-span-2 col-start-2 text-muted-foreground text-sm leading-snug">
           {detail.value}
         </span>
       )}
       {extras.length > 0 && (
-        <span className="col-span-2 col-start-2 truncate text-muted-foreground text-xs">
+        <span className="col-span-2 col-start-2 truncate text-muted-foreground text-sm">
           {extras.slice(0, EXTRA_ROW_FIELDS).map(([key, value], extraIndex) => (
             <span key={key}>
               {extraIndex > 0 && " · "}
@@ -237,7 +237,7 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <Badge
       variant="outline"
-      className={cn("h-[1.15rem] font-normal text-xs", STATUS_TONE_CLASS[statusTone(status)])}
+      className={cn("h-[1.15rem] font-normal text-sm", STATUS_TONE_CLASS[statusTone(status)])}
     >
       {statusLabel(status)}
     </Badge>
@@ -245,5 +245,5 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 function CompactJson({ value }: { value: unknown }) {
-  return <span className="break-all font-mono text-xs">{JSON.stringify(value)}</span>;
+  return <span className="break-all font-mono text-sm">{JSON.stringify(value)}</span>;
 }

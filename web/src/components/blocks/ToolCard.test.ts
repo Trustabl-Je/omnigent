@@ -116,6 +116,10 @@ describe("ToolCard rendering", () => {
     expect(trigger).toHaveAttribute("title", "Manage todo list write · 1 item (manage_todo_list)");
     expect(screen.getByTestId("tool-result-line").textContent).toBe("Task plan updated (1 task).");
     expect(screen.getByText("3.3s")).toBeInTheDocument();
+    // WHY: row text follows the Interface font size; the result line sits one caption step down.
+    expect(trigger).toHaveClass("text-ui");
+    expect(screen.getByText("Manage todo list")).toHaveClass("font-medium");
+    expect(screen.getByTestId("tool-result-line")).toHaveClass("text-sm");
   });
 
   it("tags an MCP tool with its server and reports its failure on the result line", () => {
