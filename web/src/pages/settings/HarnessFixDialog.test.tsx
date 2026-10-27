@@ -463,6 +463,42 @@ describe("HarnessFixDialog", () => {
     expect(props.onOpenChange).toHaveBeenCalledWith(false);
   });
 
+  it("cancels a device login after a polling transport error", async () => {
+    let deleteCalls = 0;
+    vi.mocked(authenticatedFetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url === "/v1/harnesses") return json(catalog);
+      if (url.endsWith("/login") && init?.method === "POST") {
+        return json({
+          login_id: "poll-error",
+          verification_url: "https://auth.example.test/device",
+          user_code: "POLL-ERR",
+          expires_at: Math.floor(Date.now() / 1000) + 900,
+        });
+      }
+      if (url.endsWith("/login/poll-error") && init?.method === "DELETE") {
+        deleteCalls += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.endsWith("/login/poll-error")) throw new Error("Connection lost");
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const user = userEvent.setup();
+    renderDialog();
+
+    await user.click(screen.getByRole("radio", { name: /Personal subscription/ }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Authenticate" }));
+    await act(async () => Promise.resolve());
+    await act(async () => vi.advanceTimersByTime(2_000));
+    expect(screen.getByText("Connection lost")).toBeVisible();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+    await act(async () => Promise.resolve());
+
+    expect(deleteCalls).toBe(1);
+  });
+
   it("cancels a stale login result after the dialog closes during start", async () => {
     let resolveStart: ((response: Response) => void) | undefined;
     const startResponse = new Promise<Response>((resolve) => {
@@ -595,6 +631,8 @@ describe("HarnessFixDialog", () => {
     await act(async () => vi.advanceTimersByTime(2_000));
     await act(async () => vi.advanceTimersByTime(10_000));
     expect(statusChecks).toBe(1);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
     await act(async () =>
       resolveRefresh?.(
         json({
@@ -604,8 +642,8 @@ describe("HarnessFixDialog", () => {
       ),
     );
 
-    expect(props.onFixed).toHaveBeenCalledTimes(1);
-    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(props.onFixed).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it("resumes and can cancel a busy Codex login", async () => {

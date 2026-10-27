@@ -490,6 +490,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
   useEffect(() => {
     if (!deviceLogin) return;
     const loginId = deviceLogin.kind === "code" ? deviceLogin.login.login_id : deviceLogin.loginId;
+    const id = runId.current;
     let stopped = false;
     let timer: number | undefined;
     const controller = new AbortController();
@@ -498,7 +499,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
     const poll = async () => {
       try {
         const result = await fetchHarnessLogin(hostId, harness, loginId, controller.signal);
-        if (stopped) return;
+        if (stopped || runId.current !== id) return;
         if (result.status === "pending") {
           timer = window.setTimeout(() => void poll(), 2000);
           return;
@@ -509,6 +510,7 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
           let harnessAccounts = result.harness_accounts;
           if (!configuredHarnesses) {
             const refreshed = await refreshHarnessesOnHost(hostId);
+            if (stopped || runId.current !== id) return;
             configuredHarnesses = refreshed.configured_harnesses;
             harnessAccounts = refreshed.harness_accounts;
           }
@@ -529,8 +531,11 @@ export function HarnessFixDialog(props: HarnessFixDialogProps) {
         setError(result.error || `Sign-in ${result.status}.`);
         setPhase("device-error");
       } catch (reason) {
-        if (!stopped && !(reason instanceof DOMException && reason.name === "AbortError")) {
-          activeLogin.current = null;
+        if (
+          !stopped &&
+          runId.current === id &&
+          !(reason instanceof DOMException && reason.name === "AbortError")
+        ) {
           setDeviceLogin(null);
           setError(reason instanceof Error ? reason.message : "Couldn’t check sign-in.");
           setPhase("device-error");
