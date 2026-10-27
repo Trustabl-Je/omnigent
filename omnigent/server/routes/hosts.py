@@ -1831,13 +1831,27 @@ def create_hosts_router(
             )
             if result.get("status") == "busy":
                 busy_id = result.get("login_id")
+                if not isinstance(busy_id, str) or not busy_id:
+                    raise HTTPException(status_code=502, detail="host returned invalid busy login")
+                conn.harness_logins.pop(login_id, None)
+                conn.harness_logins.setdefault(
+                    busy_id,
+                    HarnessLoginState(
+                        harness=harness,
+                        status="pending",
+                        error=None,
+                        expires_at=now_epoch() + 15 * 60,
+                    ),
+                )
+                conn.active_harness_logins[harness] = busy_id
+                accepted = True
                 return cast(
                     dict[str, Any],
                     JSONResponse(
                         status_code=409,
                         content={
                             "code": "login_busy",
-                            "login_id": busy_id if isinstance(busy_id, str) else login_id,
+                            "login_id": busy_id,
                         },
                     ),
                 )
@@ -1908,6 +1922,7 @@ def create_hosts_router(
             state.expired = True
             state.error = "login expired"
             state.terminal_at = now_epoch()
+            state.terminal_event.set()
             conn.active_harness_logins.pop(harness, None)
             try:
                 cancel_result = await _proxy_harness_login_cancel(
@@ -1956,11 +1971,23 @@ def create_hosts_router(
             result = await _proxy_harness_login_cancel(
                 host_registry=host_registry, host_conn=conn, login_id=login_id
             )
+            if state.status != "pending":
+                return {"status": state.status, "error": state.error, "expired": state.expired}
             if result.get("status") != "ok":
+                if result.get("error") == "login not found":
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(state.terminal_event.wait(), timeout=0.25)
+                    if state.status != "pending":
+                        return {
+                            "status": state.status,
+                            "error": state.error,
+                            "expired": state.expired,
+                        }
                 raise HTTPException(status_code=502, detail=result.get("error") or "cancel failed")
             state.status = "cancelled"
-            state.error = None
+            state.error = result.get("error") if isinstance(result.get("error"), str) else None
             state.terminal_at = now_epoch()
+            state.terminal_event.set()
             conn.active_harness_logins.pop(harness, None)
         return {"status": state.status, "error": state.error, "expired": state.expired}
 

@@ -110,11 +110,13 @@ class CodexLoginSession:
         self._next_id += 1
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        process.stdin.write(
-            (json.dumps({"id": request_id, "method": method, "params": params}) + "\n").encode()
-        )
-        await process.stdin.drain()
         try:
+            process.stdin.write(
+                (
+                    json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
+                ).encode()
+            )
+            await process.stdin.drain()
             response = await asyncio.wait_for(future, timeout=_RPC_TIMEOUT_S)
         finally:
             self._pending.pop(request_id, None)
@@ -208,8 +210,10 @@ async def claude_logout() -> None:
     try:
         return_code = await asyncio.wait_for(process.wait(), timeout=_RPC_TIMEOUT_S)
     except TimeoutError:
-        process.kill()
-        await process.wait()
         raise RuntimeError("claude logout timed out") from None
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
     if return_code != 0:
         raise RuntimeError("claude auth logout failed")

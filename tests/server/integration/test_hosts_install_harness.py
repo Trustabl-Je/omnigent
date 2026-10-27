@@ -65,6 +65,7 @@ from omnigent.stores.conversation_store.sqlalchemy_store import (
 )
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.host_store import HostStore
+from tests._helpers.polling import poll_until_async
 from tests.server.helpers import websocket_scope as _websocket_scope
 
 # Same liveness-race flake guard as test_hosts_create_directory.py: the
@@ -255,12 +256,30 @@ async def install_setup(
                 continue
             if isinstance(frame, HostHarnessLoginCancelFrame):
                 replies.setdefault("__cancelled__", {})[frame.login_id] = True
+                cancel_reply = replies.get("__cancel__", {})
+                completion = cancel_reply.get("completion")
+                if isinstance(completion, dict):
+                    await comm.send_input(
+                        {
+                            "type": "websocket.receive",
+                            "text": encode_host_frame(
+                                HostHarnessLoginCompletedFrame(
+                                    login_id=frame.login_id,
+                                    success=completion.get("success", True),
+                                    expired=completion.get("expired", False),
+                                    error=completion.get("error"),
+                                )
+                            ),
+                        }
+                    )
                 await comm.send_input(
                     {
                         "type": "websocket.receive",
                         "text": encode_host_frame(
                             HostHarnessLoginCancelResultFrame(
-                                request_id=frame.request_id, status="ok"
+                                request_id=frame.request_id,
+                                status=cancel_reply.get("status", "ok"),
+                                error=cancel_reply.get("error"),
                             )
                         ),
                     }
@@ -1062,8 +1081,11 @@ async def test_codex_login_start_status_completion_and_logout(
         )
         conn = registry.get(_HOST_ID)
         assert conn is not None
-        while conn.harness_logins[login_id].status == "pending":
-            await asyncio.sleep(0.01)
+        await poll_until_async(
+            lambda: conn.harness_logins[login_id].status != "pending",
+            timeout_s=2,
+            interval_s=0.01,
+        )
         completed = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
         assert completed.json() == {
             "status": "succeeded",
@@ -1110,6 +1132,87 @@ async def test_codex_login_busy_and_cancel(
             "error": None,
             "expired": False,
         }
+
+
+async def test_codex_login_cancel_warning_releases_busy_state(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """Confirmed local teardown is terminal even when vendor cancellation warns."""
+    app, _registry, _comm, replies, _drain = install_setup
+    replies["__cancel__"] = {
+        "status": "ok",
+        "error": "could not cancel login: vendor cancel failed",
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+        login_id = first.json()["login_id"]
+        cancelled = await client.delete(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
+        restarted = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+
+    assert cancelled.json() == {
+        "status": "cancelled",
+        "error": "could not cancel login: vendor cancel failed",
+        "expired": False,
+    }
+    assert restarted.status_code == 200
+    assert restarted.json()["login_id"] != login_id
+
+
+async def test_host_reported_busy_login_can_be_polled_and_cancelled(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """A host-owned busy id is adopted into server lifecycle state."""
+    app, _registry, _comm, replies, _drain = install_setup
+    replies["__login__"] = {"status": "busy", "login_id": "host-active-login"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        busy = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+        status = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/host-active-login")
+        cancelled = await client.delete(
+            f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/host-active-login"
+        )
+
+    assert busy.status_code == 409
+    assert busy.json() == {"code": "login_busy", "login_id": "host-active-login"}
+    assert status.json() == {"status": "pending", "error": None, "expired": False}
+    assert cancelled.json() == {"status": "cancelled", "error": None, "expired": False}
+    assert replies["__cancelled__"] == {"host-active-login": True}
+
+
+async def test_login_completion_wins_cancel_not_found_race(
+    install_setup: tuple[
+        FastAPI,
+        HostRegistry,
+        ApplicationCommunicator,
+        dict[str, dict[str, Any]],
+        asyncio.Task[None],
+    ],
+) -> None:
+    """A completion received during cancel remains the authoritative terminal state."""
+    app, _registry, _comm, replies, _drain = install_setup
+    replies["__cancel__"] = {
+        "status": "failed",
+        "error": "login not found",
+        "completion": {"success": True},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        started = await client.post(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login")
+        login_id = started.json()["login_id"]
+        cancelled = await client.delete(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
+
+    assert cancelled.status_code == 200
+    assert cancelled.json() == {"status": "succeeded", "error": None, "expired": False}
 
 
 async def test_codex_native_login_uses_canonical_host_family(
@@ -1264,8 +1367,11 @@ async def test_codex_login_completion_reports_expired_status(
         )
         conn = registry.get(_HOST_ID)
         assert conn is not None
-        while conn.harness_logins[login_id].status == "pending":
-            await asyncio.sleep(0.01)
+        await poll_until_async(
+            lambda: conn.harness_logins[login_id].status != "pending",
+            timeout_s=2,
+            interval_s=0.01,
+        )
 
         status = await client.get(f"/v1/hosts/{_HOST_ID}/harnesses/codex/login/{login_id}")
 

@@ -26,6 +26,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, SupportsIndex, SupportsInt, TypeVar, cast
 
@@ -1178,6 +1179,8 @@ class _ActiveHarnessLogin:
     session: CodexLoginSession
     task: asyncio.Task[object]
     vendor_login_id: str | None = None
+    cancel_requested: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    teardown_complete: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
 
 
 def _host_frame_failure_context(raw: str) -> _HostFrameFailureContext:
@@ -3242,8 +3245,32 @@ class HostProcess:
         )
         self._active_harness_logins[harness] = active
         self._owned_subprocess_ops += 1
+        start_task = asyncio.create_task(session.start(), name="host-codex-login-start")
+        cancel_wait = asyncio.create_task(
+            active.cancel_requested.wait(), name="host-codex-login-cancel-wait"
+        )
         try:
-            login = await asyncio.wait_for(session.start(), timeout=HARNESS_LOGIN_START_TIMEOUT_S)
+            done, _pending = await asyncio.wait(
+                {start_task, cancel_wait},
+                timeout=HARNESS_LOGIN_START_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_wait in done:
+                start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await start_task
+                return HostHarnessLoginResultFrame(
+                    request_id=frame.request_id,
+                    status="cancelled",
+                    login_id=frame.login_id,
+                    error="login cancelled",
+                )
+            if start_task not in done:
+                start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await start_task
+                raise TimeoutError
+            login = start_task.result()
             active.vendor_login_id = login.login_id
         except asyncio.CancelledError:
             raise
@@ -3255,12 +3282,20 @@ class HostProcess:
                 error=f"could not start codex login: {exc}",
             )
         finally:
+            cancel_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_wait
+            if not start_task.done():
+                start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await start_task
             self._owned_subprocess_ops -= 1
             if active.vendor_login_id is None:
                 current = self._active_harness_logins.get(harness)
                 if current is active:
                     self._active_harness_logins.pop(harness, None)
                 await session.close()
+                active.teardown_complete.set()
         expires_at = int(time.time() + HARNESS_LOGIN_COMPLETION_TIMEOUT_S)
         watcher = asyncio.create_task(
             self._watch_harness_login(
@@ -3292,12 +3327,14 @@ class HostProcess:
     ) -> None:
         """Publish the terminal outcome and clean up the login subprocess."""
         try:
+            expired = False
             try:
                 success, error = await asyncio.wait_for(
                     session.wait_completed(vendor_login_id),
                     timeout=HARNESS_LOGIN_COMPLETION_TIMEOUT_S,
                 )
             except TimeoutError:
+                expired = True
                 success, error = False, "login expired"
                 with contextlib.suppress(Exception):
                     await session.cancel(vendor_login_id)
@@ -3310,7 +3347,7 @@ class HostProcess:
                     HostHarnessLoginCompletedFrame(
                         login_id=login_id,
                         success=success,
-                        expired=not success and error == "login expired",
+                        expired=expired,
                         error=error,
                         configured_harnesses=configured,
                         harness_accounts=accounts,
@@ -3319,11 +3356,26 @@ class HostProcess:
             )
         except (asyncio.CancelledError, ConnectionClosed):
             raise
+        except Exception:
+            _logger.exception("Could not publish completion for harness login %s", login_id)
+            with contextlib.suppress(Exception):
+                await self._send_text(
+                    ws,
+                    encode_host_frame(
+                        HostHarnessLoginCompletedFrame(
+                            login_id=login_id,
+                            success=False,
+                            error="could not finalize harness login",
+                        )
+                    ),
+                )
         finally:
             active = self._active_harness_logins.get(harness)
             if active is not None and active.login_id == login_id:
                 self._active_harness_logins.pop(harness, None)
             await session.close()
+            if active is not None and active.login_id == login_id:
+                active.teardown_complete.set()
 
     async def _handle_harness_login_cancel(
         self, frame: HostHarnessLoginCancelFrame
@@ -3344,6 +3396,13 @@ class HostProcess:
                 error="login not found",
             )
         harness, active = active_pair
+        if active.vendor_login_id is None:
+            active.cancel_requested.set()
+            await active.teardown_complete.wait()
+            return HostHarnessLoginCancelResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+            )
         cancel_error: Exception | None = None
         try:
             if active.vendor_login_id is not None:
@@ -3361,7 +3420,7 @@ class HostProcess:
         if cancel_error is not None:
             return HostHarnessLoginCancelResultFrame(
                 request_id=frame.request_id,
-                status="failed",
+                status="ok",
                 error=f"could not cancel login: {cancel_error}",
             )
         return HostHarnessLoginCancelResultFrame(

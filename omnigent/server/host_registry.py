@@ -253,6 +253,7 @@ class HarnessLoginState:
     configured_harnesses: dict[str, HarnessAvailability] | None = None
     harness_accounts: HarnessAccounts | None = None
     terminal_at: int | None = None
+    terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
 class RunnerExitReports:
