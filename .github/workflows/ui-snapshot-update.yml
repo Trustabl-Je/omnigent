@@ -51,7 +51,6 @@ jobs:
     if: >-
       github.event.label.name == 'update-ui-snapshot' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
     runs-on: ubuntu-24.04
     # Same digest-pinned image as the compare gate, so the regenerated baseline
     # is byte-identical to what ui-snapshot.yml will then compare against. Keep
