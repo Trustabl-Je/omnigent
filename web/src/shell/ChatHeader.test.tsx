@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -150,11 +150,17 @@ afterEach(() => {
 
 it.each([false, true])("links the creating session (mobile=%s)", async (mobile) => {
   isMobileMock.mockReturnValue(mobile);
-  const lookup = vi.spyOn(sessionsApi, "getSessionSlim").mockResolvedValue({
-    id: "manager",
-    title: "Release manager",
-  } as Session);
+  let resolveCreator!: (session: Session) => void;
+  const lookup = vi.spyOn(sessionsApi, "getSessionSlim").mockReturnValue(
+    new Promise<Session>((resolve) => {
+      resolveCreator = resolve;
+    }),
+  );
   renderHeader({ sidebarOpen: true, conversationId: "worker", createdBySessionId: "manager" });
+  expect(screen.queryByText(/Created by/)).not.toBeInTheDocument();
+  await act(async () => {
+    resolveCreator({ id: "manager", title: "Release manager" } as Session);
+  });
   expect(await screen.findByRole("link", { name: "Release manager" })).toHaveAttribute(
     "href",
     "/c/manager",
@@ -165,10 +171,11 @@ it.each([false, true])("links the creating session (mobile=%s)", async (mobile) 
 });
 
 it.each([403, 404])("does not link or name an unavailable creator (%s)", async (status) => {
-  const lookup = vi.spyOn(sessionsApi, "getSessionSlim").mockRejectedValue(new Error(`${status}`));
+  vi.spyOn(sessionsApi, "getSessionSlim").mockRejectedValue(
+    new sessionsApi.ApiError("Unavailable", status, null),
+  );
   renderHeader({ sidebarOpen: true, conversationId: "worker", createdBySessionId: "private" });
-  await waitFor(() => expect(lookup).toHaveBeenCalled());
-  expect(screen.getByText("Created by another session")).toBeInTheDocument();
+  expect(await screen.findByText("Created by another session")).toBeInTheDocument();
   expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
 

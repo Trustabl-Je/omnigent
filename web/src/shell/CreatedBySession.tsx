@@ -6,7 +6,8 @@ export const CREATED_BY_SESSION_LABEL_KEY = "omnigent.created_by_session_id";
 
 /** Resolve the creator through its own access-checked snapshot, never the worker's title. */
 export function CreatedBySession({ sessionId }: { sessionId: string }) {
-  const { session, error } = useSession(sessionId);
+  const { session, isLoading, error } = useSession(sessionId);
+  if (isLoading) return null;
   return (
     <span className="min-w-0 truncate text-xs text-muted-foreground">
       Created by{" "}

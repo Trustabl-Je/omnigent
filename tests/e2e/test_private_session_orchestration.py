@@ -1,5 +1,6 @@
 """Real local host/server/SDK and Codex processes; scripted model, no cloud sandbox."""
 
+import ast
 import json
 import os
 import shutil
@@ -331,9 +332,26 @@ def test_private_manager_launch_send_read_and_sharing(
                 send(manager, "MANAGER_SEND_READ_CREATE_FIND")
                 wait_text(manager, "CREATOR_FOUND")
                 for call_id in ("creator-list", "creator-info"):
-                    outputs = json.dumps(tool_results(call_id))
-                    assert "created_by_session_id" in outputs and manager in outputs
-                    assert created["id"] in outputs
+                    results = tool_results(call_id)
+                    assert results
+                    output = results[-1].get("output", results[-1].get("content"))
+                    if harness == "codex-native":
+                        # Codex wraps MCP content in timing text; the SDK renders a Python dict.
+                        content = json.loads(output.split("\nOutput:\n", 1)[1])
+                        payload = json.loads(content[0]["text"])
+                    else:
+                        payload = ast.literal_eval(output)
+                    discovered_worker = (
+                        next(
+                            row
+                            for row in payload["sessions"]
+                            if row["session_id"] == created["id"]
+                        )
+                        if call_id == "creator-list"
+                        else payload
+                    )
+                    assert discovered_worker["session_id"] == created["id"]
+                    assert discovered_worker["created_by_session_id"] == manager
 
                 before_managed = {
                     row["id"]
