@@ -287,7 +287,10 @@ asks for confirmation before running, and a failed attempt opens the dialog,
 whose **Reconnect Arca** action retries. Success is reported only once the
 server lists the session's own host online; otherwise the dialog says the host
 is still offline and points to **Switch host** in case Arca came back as a
-different host.
+different host. In a session on an offline Arca host, the desktop app keeps the
+composer open: sending starts the same Arca reconnect, the message waits in the
+queue as **Waiting for host** without reaching the server, and it sends once the
+host is back.
 
 **Message recovery:** send the first prompt while a runner is starting, or send
 another message after its runner restarts. Also open a sub-agent's conversation
@@ -347,7 +350,11 @@ after stopping; this relaunches the parent and both use one runner. Sending to
 an existing side chat or choosing Resume after the parent's runner exited (for
 example, on its idle timeout) also relaunches the parent, then moves the side
 chat to that runner. Close a side
-chat with its tab's close button; the parent and sibling chats keep running. A
+chat with its tab's close button; the parent and sibling chats keep running.
+While a side chat works, typing a follow-up turns Interrupt into Send, which
+queues or steers it as the main composer does; Escape still interrupts. Its queue
+strip offers edit, steer, reorder and delete, and Mod+Enter steers them all.
+Closing the side chat discards its queued follow-ups. A
 chat-only side chat can also send messages from its direct `/c/<child_id>` URL
 without choosing a workspace. The side-chat composer opens the same `/` menu
 affordance as the main composer but with a narrower set — `/help` and the
@@ -604,6 +611,13 @@ plain `uv run pytest`, which starts a private server for the test.
   real runner crash that must still report a failure. Requires both native
   CLIs and tmux; Claude's machine-managed credentials require an isolated
   container for the local model endpoint.
+- **`stop`, `archive`, host-bound sub-agent children:**
+  `tests/server/integration/test_session_host_launch.py` (`-k shared_runner`)
+  creates a child through `POST /v1/sessions` with `host_id` and
+  `parent_session_id`, so it rides its parent's runner over a real host tunnel.
+  Archiving, stopping, or relaunching the child leaves that runner up for the
+  parent and its siblings, including a grandchild still bound to the root's
+  runner; a child bound to a runner of its own still tears it down.
 - **`stop`, `side-chat-lifecycle`, hosted side chats (own environment):**
   `tests/e2e_ui/sessions/test_stop_side_chats.py::test_stop_session_stops_hosted_side_chats`
   drives both desktop sidebar menus and the mobile long-press menu with a real
@@ -662,11 +676,13 @@ plain `uv run pytest`, which starts a private server for the test.
   `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_performs_local_host_reconnect`,
   `tests/e2e_ui/sessions/test_reconnect_local_host_from_app.py::test_desktop_reconnect_failure_offers_retry`,
   `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_reconnects_arca_from_current_chat`,
-  `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_arca_reconnect_failure_offers_retry`
+  `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_arca_reconnect_failure_offers_retry`,
+  `tests/e2e_ui/sessions/test_reconnect_arca_from_app.py::test_desktop_send_reconnects_offline_arca_then_sends`
   drive the real SPA and server with an injected desktop bridge and offline host
   responses. The Arca journeys cover a remembered host and a CLI-seeded host
   with no saved ID; they check one-action start, progress, failure and retry,
-  not live SSH or the desktop's consent console.
+  and a message that waits for the host, not live SSH or the desktop's consent
+  console.
 - **`message-recovery`, native binding races (own environment):**
   `tests/e2e/test_native_runner_binding_races_e2e.py::test_native_send_rechecks_binding_after_runner_miss`
   drives real servers, runners, and Claude/Codex CLIs with a mock model. It
