@@ -5597,6 +5597,7 @@ def test_fork_conversation_drops_instance_scoped_labels(
             "omnigent.codex_native.bypass_sandbox": "1",
             # An ordinary, non-instance label that SHOULD carry over.
             "omnigent.wrapper": "claude-code-native-ui",
+            "omnigent.created_by_session_id": "original-manager",
         },
     )
 

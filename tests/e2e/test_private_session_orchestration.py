@@ -304,12 +304,36 @@ def test_private_manager_launch_send_read_and_sharing(
                 created = next(row for row in rows if row["title"] == "Independent worker")
                 created = client.get(f"/v1/sessions/{created['id']}").json()
                 assert created["parent_session_id"] is None
+                assert created["labels"]["omnigent.created_by_session_id"] == manager
                 assert created["host_id"] == host_id
                 wait_text(created["id"], "NEW_WORKER_RESULT")
                 grants = client.get(f"/v1/sessions/{created['id']}/permissions").json()[
                     "permissions"
                 ]
                 assert [g["user_id"] for g in grants] == ["local"]
+
+                configure(
+                    "MANAGER_SEND_READ_CREATE_FIND",
+                    [
+                        {"tool_calls": [tool("sys_session_list", {}, "creator-list")]},
+                        {
+                            "tool_calls": [
+                                tool(
+                                    "sys_session_get_info",
+                                    {"session_id": created["id"]},
+                                    "creator-info",
+                                )
+                            ]
+                        },
+                        {"text": "CREATOR_FOUND"},
+                    ],
+                )
+                send(manager, "MANAGER_SEND_READ_CREATE_FIND")
+                wait_text(manager, "CREATOR_FOUND")
+                for call_id in ("creator-list", "creator-info"):
+                    outputs = json.dumps(tool_results(call_id))
+                    assert "created_by_session_id" in outputs and manager in outputs
+                    assert created["id"] in outputs
 
                 before_managed = {
                     row["id"]

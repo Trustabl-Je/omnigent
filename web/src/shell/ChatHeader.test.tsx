@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
@@ -9,6 +9,8 @@ import type { Agent } from "@/hooks/useAgents";
 import type { Conversation } from "@/hooks/useConversations";
 import type * as NativeBridgeModule from "@/lib/nativeBridge";
 import { setOmnigentHostConfig } from "@/lib/host";
+import * as sessionsApi from "@/lib/sessionsApi";
+import type { Session } from "@/lib/types";
 import { ChatHeader } from "./ChatHeader";
 import {
   TerminalFirstContextProvider,
@@ -69,6 +71,7 @@ function renderHeader(props: {
   isChildSession?: boolean;
   subAgentName?: string | null;
   conversationId?: string;
+  createdBySessionId?: string;
   actionConversation?: Conversation | null;
   conversationTitle?: string | null;
   projectName?: string | null;
@@ -106,6 +109,7 @@ function renderHeader(props: {
             // right-panel toggle / rail entries all gate on conversationId and
             // stay unmounted, isolating the left-slot affordances under test.
             conversationId={props.conversationId}
+            createdBySessionId={props.createdBySessionId}
             actionConversation={props.actionConversation}
             conversationTitle={props.conversationTitle ?? null}
             projectName={props.projectName ?? null}
@@ -137,10 +141,35 @@ function renderHeader(props: {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   setOmnigentHostConfig({});
   isIOSShellMock.mockReturnValue(false);
   isAndroidShellMock.mockReturnValue(false);
   isMobileMock.mockReturnValue(false);
+});
+
+it.each([false, true])("links the creating session (mobile=%s)", async (mobile) => {
+  isMobileMock.mockReturnValue(mobile);
+  const lookup = vi.spyOn(sessionsApi, "getSessionSlim").mockResolvedValue({
+    id: "manager",
+    title: "Release manager",
+  } as Session);
+  renderHeader({ sidebarOpen: true, conversationId: "worker", createdBySessionId: "manager" });
+  expect(await screen.findByRole("link", { name: "Release manager" })).toHaveAttribute(
+    "href",
+    "/c/manager",
+  );
+  expect(lookup).toHaveBeenCalledWith("manager", { refreshState: true });
+  expect(screen.getByText(/Created by/)).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Back to parent session" })).not.toBeInTheDocument();
+});
+
+it.each([403, 404])("does not link or name an unavailable creator (%s)", async (status) => {
+  const lookup = vi.spyOn(sessionsApi, "getSessionSlim").mockRejectedValue(new Error(`${status}`));
+  renderHeader({ sidebarOpen: true, conversationId: "worker", createdBySessionId: "private" });
+  await waitFor(() => expect(lookup).toHaveBeenCalled());
+  expect(screen.getByText("Created by another session")).toBeInTheDocument();
+  expect(screen.queryByRole("link")).not.toBeInTheDocument();
 });
 
 describe("ChatHeader — deployed Share presentation", () => {
