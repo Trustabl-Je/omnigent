@@ -81,7 +81,6 @@ jobs:
     name: UI performance regression check
     needs: [gate, detect]
     if: needs.detect.outputs.ui == 'true' && github.event.pull_request.draft != true
-    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:

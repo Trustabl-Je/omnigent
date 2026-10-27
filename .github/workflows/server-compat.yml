@@ -126,7 +126,7 @@ jobs:
   compat-smoke-ui-config-a:
     name: "Compat smoke – UI Config A (new SPA / old server ${{ needs.resolve-latest.outputs.latest_tag }})"
     needs: resolve-latest
-    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
+    # Playwright 1.60 cannot install Chromium on ubuntu-26.04, ubuntu-latest's new image.
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -143,7 +143,7 @@ jobs:
   compat-smoke-ui-config-b:
     name: "Compat smoke – UI Config B (old SPA ${{ needs.resolve-latest.outputs.latest_tag }} / new server)"
     needs: resolve-latest
-    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
+    # Playwright 1.60 cannot install Chromium on ubuntu-26.04, ubuntu-latest's new image.
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -281,7 +281,7 @@ jobs:
   backcompat-e2e-ui:
     name: "Backcompat e2e-ui (Config ${{ matrix.config }}: ${{ matrix.config == 'A' && matrix.server || matrix.ui }}, shard ${{ matrix.shard_id }}/${{ matrix.num_shards }})"
     needs: setup-ui
-    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
+    # Playwright 1.60 cannot install Chromium on ubuntu-26.04, ubuntu-latest's new image.
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
