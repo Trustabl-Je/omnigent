@@ -131,6 +131,7 @@ jobs:
     # Skipped (not failed) when no render input changed -> reports SUCCESS, so a
     # non-UI PR neither runs the render nor blocks a required check.
     if: ${{ needs.detect.outputs.ui == 'true' }}
+    # Playwright's Chromium doesn't support ubuntu-26.04 yet; unpin once Playwright does.
     runs-on: ubuntu-24.04
     # Render in the digest-pinned Playwright image (browsers + fonts baked in),
     # so the committed baseline and the PR comparison are byte-identical and a
